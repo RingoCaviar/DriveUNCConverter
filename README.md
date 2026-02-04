@@ -20,7 +20,7 @@
 
 ### 📸 截图
 
-![主界面](screenshots/main.png)
+![主界面](assets/image-20260204154249046.png)
 
 ### 🚀 使用方法
 
