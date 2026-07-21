@@ -80,12 +80,23 @@ function Ask-YesNo([string]$Prompt, [bool]$Default = $false) {
     }
 }
 
-function Get-PythonPath {
+function Initialize-VirtualEnvironment {
     $venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $venvPython) { return $venvPython }
-    $command = Get-Command python -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-    throw "Python not found"
+
+    Write-Step "$($L.Installing): .venv"
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        & $pyLauncher.Source -3 -m venv (Join-Path $ProjectRoot ".venv")
+    } else {
+        $command = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $command) { throw "$($L.Missing): Python 3" }
+        & $command.Source -m venv (Join-Path $ProjectRoot ".venv")
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
+        throw "$($L.Failed): .venv ($LASTEXITCODE)"
+    }
+    return $venvPython
 }
 
 function Resolve-Icon([string]$InputPath) {
@@ -166,7 +177,7 @@ try {
         if (-not (Test-Path -LiteralPath $requiredPath)) { throw "$($L.Missing): $requiredPath" }
     }
 
-    $Python = Get-PythonPath
+    $Python = Initialize-VirtualEnvironment
     Write-Step "$($L.UsingPython): $Python"
     & $Python --version
 
