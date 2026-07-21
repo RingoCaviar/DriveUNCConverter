@@ -23,6 +23,10 @@ from drive_utils import (
     remove_network_drive,
     remove_network_location_item,
     list_server_shares,
+    diagnose_share_browse_identity,
+    test_share_credentials,
+    get_clearable_smb_connections,
+    disconnect_server_sessions,
 )
 
 
@@ -102,6 +106,14 @@ LANGUAGES = {
         "add_unc_label": '网络路径 (UNC / IP):',
         "add_unc_placeholder": '例如 \\\\server\\share 或仅 IP: 192.168.1.10',
         "add_browse_shares": '浏览共享',
+        "add_diagnose_browse": '排查浏览',
+        "diagnosing_browse": '正在排查 SMB 浏览身份...',
+        "diagnose_browse_title": 'SMB 浏览身份排查',
+        "test_credentials": '测试凭证',
+        "testing_credentials": '正在测试用户名和密码...',
+        "test_credentials_title": 'SMB 凭证测试',
+        "clear_current_sessions": '清理当前连接',
+        "confirm_clear_current_sessions": '确定清理 {unc} 所属服务器的无盘符 SMB 连接吗？\n\n软件会直接尝试断开完整共享路径、IPC$ 和服务器根连接；已有映射盘会保留。',
         "add_browsing_shares": '正在浏览共享...',
         "add_shares_label": '可用共享（点击选择）:',
         "add_shares_empty": '未找到共享文件夹',
@@ -142,15 +154,19 @@ LANGUAGES = {
         "remove_location": '删除位置',
         "remove_no_drives": '没有可删除的网络驱动器',
         "remove_no_locations": '没有可删除的网络位置',
+        "remove_sessions_section": '可清理的 SMB 连接',
+        "remove_no_sessions": '没有检测到可枚举的 SMB 连接',
+        "remove_session": '断开服务器会话',
+        "confirm_remove_session": '确定断开服务器 {server} 的无盘符 SMB 会话吗？\n\n检测到的身份: {identity}\n\n已有映射盘会被保留；正在使用的文件可能导致断开失败。',
         "removing": '正在删除...',
         "remove_success": '删除成功',
         "remove_error": '删除失败',
         "confirm_remove_drive": '确定要删除网络驱动器吗？\n\n盘符: {drive}\nUNC路径: {unc}\n\n⚠️ 此操作将断开该驱动器映射。{cred_note}\n请确保没有正在使用该驱动器的文件！',
         "confirm_remove_location": '确定要删除网络位置吗？\n\n名称: {name}\nUNC路径: {unc}\n\n此操作将移除该网络位置快捷方式。{cred_note}',
         "confirm_remove_title": '确认删除',
-        "tip_remove": '💡 可在此直接删除已映射的网络驱动器，或移除已创建的网络位置。勾选“同时删除相关凭据”后，会清除该服务器在 Windows 凭据管理器中的保存账号，下次添加需重新输入用户名和密码。',
-        "remove_also_credentials": '同时删除相关凭据（下次需重新输入用户名和密码）',
-        "cred_note_yes": '\n• 同时删除相关 Windows 凭据',
+        "tip_remove": '💡 可在此直接删除已映射的网络驱动器，或移除已创建的网络位置。勾选清理选项后，会断开该服务器残留的无盘符 SMB 会话（如 IPC$）并删除保存凭据；同一服务器的其他映射盘会保留。',
+        "remove_also_credentials": '断开残留 SMB 会话并删除相关凭据',
+        "cred_note_yes": '\n• 断开该服务器残留的无盘符 SMB 会话\n• 同时删除相关 Windows 凭据',
         "cred_note_no": '',
     },
     "en": {
@@ -187,6 +203,14 @@ LANGUAGES = {
         "add_unc_label": 'Network Path (UNC / IP):',
         "add_unc_placeholder": 'e.g. \\\\server\\share or just IP: 192.168.1.10',
         "add_browse_shares": 'Browse Shares',
+        "add_diagnose_browse": 'Diagnose',
+        "diagnosing_browse": 'Diagnosing SMB browse identity...',
+        "diagnose_browse_title": 'SMB Browse Identity Diagnosis',
+        "test_credentials": 'Test Credentials',
+        "testing_credentials": 'Testing username and password...',
+        "test_credentials_title": 'SMB Credential Test',
+        "clear_current_sessions": 'Clear Connections',
+        "confirm_clear_current_sessions": 'Clear drive-less SMB connections for {unc}?\n\nThe exact share, IPC$, and server root will be tried. Existing mapped drives are preserved.',
         "add_browsing_shares": 'Browsing shares...',
         "add_shares_label": 'Available shares (click to select):',
         "add_shares_empty": 'No shared folders found',
@@ -227,15 +251,19 @@ LANGUAGES = {
         "remove_location": 'Remove Location',
         "remove_no_drives": 'No network drives to remove',
         "remove_no_locations": 'No network locations to remove',
+        "remove_sessions_section": 'Clearable SMB Connections',
+        "remove_no_sessions": 'No enumerable SMB connections detected',
+        "remove_session": 'Disconnect Server',
+        "confirm_remove_session": 'Disconnect drive-less SMB sessions for {server}?\n\nDetected identity: {identity}\n\nMapped drives are preserved; open files may prevent disconnection.',
         "removing": 'Removing...',
         "remove_success": 'Removed Successfully',
         "remove_error": 'Remove Failed',
         "confirm_remove_drive": 'Are you sure you want to remove this network drive?\n\nDrive: {drive}\nUNC Path: {unc}\n\n⚠️ This will disconnect the drive mapping.{cred_note}\nMake sure no files are in use on this drive!',
         "confirm_remove_location": 'Are you sure you want to remove this network location?\n\nName: {name}\nUNC Path: {unc}\n\nThis will delete the network location shortcut.{cred_note}',
         "confirm_remove_title": 'Confirm Removal',
-        "tip_remove": '💡 Remove a mapped network drive or delete a network location here. If “Also delete related credentials” is checked, saved Windows credentials for that server will be cleared, so the next add requires username and password again.',
-        "remove_also_credentials": 'Also delete related credentials (re-enter username/password next time)',
-        "cred_note_yes": '\n• Also delete related Windows credentials',
+        "tip_remove": '💡 Remove a mapped drive or network location here. When cleanup is checked, the app disconnects leftover SMB sessions without drive letters (such as IPC$) and deletes saved credentials. Other mapped drives on the same server are preserved.',
+        "remove_also_credentials": 'Disconnect leftover SMB sessions and delete related credentials',
+        "cred_note_yes": '\n• Disconnect leftover SMB sessions without drive letters\n• Also delete related Windows credentials',
         "cred_note_no": '',
     }
 }
@@ -294,6 +322,10 @@ class DriveNetworkConverter(ctk.CTk):
             self.network_locations = get_network_locations()
         except Exception:
             self.network_locations = []
+        try:
+            self.smb_sessions, self.smb_sessions_error = get_clearable_smb_connections()
+        except Exception as exc:
+            self.smb_sessions, self.smb_sessions_error = [], str(exc)
     
     def create_widgets(self):
         """创建所有UI组件"""
@@ -705,6 +737,18 @@ class DriveNetworkConverter(ctk.CTk):
         )
         self.add_browse_btn.pack(side="left")
 
+        self.add_diagnose_btn = ctk.CTkButton(
+            unc_row,
+            text=self.get_text("add_diagnose_browse"),
+            width=100,
+            height=36,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+            fg_color="#6a1b9a",
+            hover_color="#4a148c",
+            command=self.on_diagnose_share_browse,
+        )
+        self.add_diagnose_btn.pack(side="left", padx=(8, 0))
+
         ctk.CTkLabel(
             form,
             text=self.get_text("add_shares_hint"),
@@ -754,6 +798,33 @@ class DriveNetworkConverter(ctk.CTk):
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         )
         self.add_password_entry.pack(fill="x", pady=(4, 0))
+
+        cred_action_row = ctk.CTkFrame(cred_inner, fg_color="transparent")
+        cred_action_row.pack(fill="x", pady=(10, 0))
+
+        self.add_test_credentials_btn = ctk.CTkButton(
+            cred_action_row,
+            text=self.get_text("test_credentials"),
+            width=130,
+            height=32,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+            fg_color="#ad6517",
+            hover_color="#7f480d",
+            command=self.on_test_credentials,
+        )
+        self.add_test_credentials_btn.pack(side="right")
+
+        self.add_clear_sessions_btn = ctk.CTkButton(
+            cred_action_row,
+            text=self.get_text("clear_current_sessions"),
+            width=130,
+            height=32,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+            fg_color="#6d4c41",
+            hover_color="#4e342e",
+            command=self.on_clear_current_server_sessions,
+        )
+        self.add_clear_sessions_btn.pack(side="right", padx=(0, 8))
 
         # Share list container
         self.add_shares_frame = ctk.CTkFrame(form, fg_color=("#e8f0e8", "#1c2a1c"))
@@ -964,6 +1035,91 @@ class DriveNetworkConverter(ctk.CTk):
             self.set_status(message, color="yellow")
             messagebox.showinfo(self.get_text("browse_success"), message)
 
+    def on_diagnose_share_browse(self):
+        """排查为什么未输入凭据仍能枚举指定服务器的共享。"""
+        raw = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
+        server = normalize_server_name(raw)
+        if not server:
+            messagebox.showerror(self.get_text("add_error"), self.get_text("error_no_server"))
+            return
+
+        self.set_status(self.get_text("diagnosing_browse"), color="yellow")
+        if hasattr(self, "add_diagnose_btn"):
+            self.add_diagnose_btn.configure(state="disabled")
+        self.update()
+
+        try:
+            success, report = diagnose_share_browse_identity(server)
+        finally:
+            if hasattr(self, "add_diagnose_btn"):
+                self.add_diagnose_btn.configure(state="normal")
+
+        if success:
+            self.set_status(self.get_text("diagnose_browse_title"), color="green")
+        else:
+            self.set_status(f"❌ {report}", color="red")
+        self.show_detail_error(self.get_text("diagnose_browse_title"), report)
+
+    def on_test_credentials(self):
+        """Test entered credentials against the selected concrete share."""
+        unc = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
+        username = self.add_username_entry.get().strip() if hasattr(self, "add_username_entry") else ""
+        password = self.add_password_entry.get() if hasattr(self, "add_password_entry") else ""
+
+        self.set_status(self.get_text("testing_credentials"), color="yellow")
+        self.add_test_credentials_btn.configure(state="disabled")
+        self.update()
+        try:
+            success, report = test_share_credentials(unc, username, password)
+        finally:
+            self.add_test_credentials_btn.configure(state="normal")
+
+        self.set_status(
+            self.get_text("test_credentials_title") if success else report.splitlines()[-1],
+            color="green" if success else "red",
+        )
+        self.show_detail_error(self.get_text("test_credentials_title"), report)
+
+    def on_clear_current_server_sessions(self):
+        """Clear hidden SMB state using the exact UNC entered by the user."""
+        raw = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
+        unc = normalize_unc_path(raw)
+        if not unc:
+            messagebox.showerror(self.get_text("add_error"), self.get_text("error_invalid_unc"))
+            return
+        msg = self.get_text("confirm_clear_current_sessions").format(unc=unc)
+        if not messagebox.askyesno(self.get_text("confirm_remove_title"), msg, icon="warning"):
+            return
+        self.add_clear_sessions_btn.configure(state="disabled")
+        self.set_status(self.get_text("removing"), color="yellow")
+        self.update()
+        try:
+            success, message, removed = disconnect_server_sessions(unc, force=True)
+            server = normalize_server_name(unc)
+            remaining, check_error = get_clearable_smb_connections()
+            remaining = [
+                item for item in remaining
+                if str(item.get("ServerName") or "").casefold() == str(server).casefold()
+            ]
+            if remaining:
+                success = False
+                shares = ", ".join(sorted({str(i.get("ShareName") or "(server)") for i in remaining}))
+                message += "\n仍检测到连接: " + shares
+            elif check_error:
+                message += "\n复查提示: " + check_error
+            elif removed:
+                message += "\n已复查：Get-SmbConnection 中未再发现该服务器。"
+        finally:
+            self.add_clear_sessions_btn.configure(state="normal")
+        self.refresh_data()
+        if hasattr(self, "remove_list_frame"):
+            self.update_remove_lists()
+        self.set_status(message, color="green" if success else "red")
+        if success:
+            messagebox.showinfo(self.get_text("remove_success"), message)
+        else:
+            self.show_detail_error(self.get_text("remove_error"), message)
+
     def _render_share_list(self, shares):
         """渲染共享列表"""
         if not hasattr(self, "add_shares_list"):
@@ -1005,13 +1161,19 @@ class DriveNetworkConverter(ctk.CTk):
             )
             btn.pack(fill="x", padx=4, pady=2)
 
-            ctk.CTkLabel(
+            path_preview = ctk.CTkEntry(
                 row,
-                text=unc,
                 font=ctk.CTkFont(family=SYSTEM_FONT, size=11),
                 text_color=("#6a7a6a", "#8a9a8a"),
-                anchor="w",
-            ).pack(fill="x", padx=10, pady=(0, 4))
+                fg_color="transparent",
+                border_width=0,
+                height=24,
+            )
+            path_preview.insert(0, unc)
+            # A read-only entry keeps the path selectable and copyable without
+            # allowing accidental edits to the preview.
+            path_preview.configure(state="readonly")
+            path_preview.pack(fill="x", padx=7, pady=(0, 4))
 
     def on_select_share(self, unc_path):
         """选择共享后填入 UNC 输入框"""
@@ -1129,7 +1291,6 @@ class DriveNetworkConverter(ctk.CTk):
             self.update_add_drive_letters()
             self.update_remove_lists()
             # 清空敏感字段
-            self.add_password_entry.delete(0, "end")
             messagebox.showinfo(self.get_text("add_success"), message)
         else:
             first_line = message.splitlines()[0] if message else self.get_text("add_error")
@@ -1253,6 +1414,55 @@ class DriveNetworkConverter(ctk.CTk):
                     fg_color="#c62828",
                     hover_color="#8e0000",
                     command=lambda d=drive, u=unc: self.on_remove_drive(d, u),
+                ).pack(side="right", padx=10)
+
+        # Active SMB sessions section (includes IPC$/drive-less sessions).
+        ctk.CTkLabel(
+            self.remove_list_frame,
+            text=self.get_text("remove_sessions_section"),
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=15),
+            anchor="w",
+        ).pack(fill="x", pady=(14, 6))
+
+        sessions_by_server = {}
+        for item in getattr(self, "smb_sessions", []):
+            server = str(item.get("ServerName") or "").strip()
+            if server:
+                sessions_by_server.setdefault(server, []).append(item)
+
+        if not sessions_by_server:
+            empty_text = getattr(self, "smb_sessions_error", None) or self.get_text("remove_no_sessions")
+            ctk.CTkLabel(
+                self.remove_list_frame,
+                text=empty_text,
+                text_color="gray",
+                font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=(0, 8))
+        else:
+            for server, items in sorted(sessions_by_server.items()):
+                identities = sorted({str(i.get("UserName") or i.get("Credential") or "未知身份") for i in items})
+                shares = sorted({str(i.get("ShareName") or "(server)") for i in items})
+                sources = sorted({source for i in items for source in i.get("Sources", [])})
+                identity = ", ".join(identities)
+                row = ctk.CTkFrame(self.remove_list_frame, height=78)
+                row.pack(fill="x", pady=3)
+                row.pack_propagate(False)
+                ctk.CTkLabel(
+                    row,
+                    text=f"{server}\n{identity} | {', '.join(shares)}\n来源: {', '.join(sources) or 'Windows'}",
+                    font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+                    anchor="w",
+                    justify="left",
+                ).pack(side="left", fill="x", expand=True, padx=10)
+                ctk.CTkButton(
+                    row,
+                    text=self.get_text("remove_session"),
+                    width=135,
+                    height=32,
+                    fg_color="#c62828",
+                    hover_color="#8e0000",
+                    command=lambda s=server, i=identity: self.on_remove_smb_session(s, i),
                 ).pack(side="right", padx=10)
 
         # Locations section
@@ -1401,6 +1611,27 @@ class DriveNetworkConverter(ctk.CTk):
             messagebox.showinfo(self.get_text("remove_success"), message)
         else:
             self.set_status(f"❌ {message}", color="red")
+            messagebox.showerror(self.get_text("remove_error"), message)
+
+    def on_remove_smb_session(self, server, identity):
+        msg = self.get_text("confirm_remove_session").format(server=server, identity=identity)
+        if not messagebox.askyesno(self.get_text("confirm_remove_title"), msg, icon="warning"):
+            return
+        success, message, _removed = disconnect_server_sessions(server, force=True)
+        self.refresh_data()
+        self.update_remove_lists()
+        remaining = [
+            item for item in getattr(self, "smb_sessions", [])
+            if str(item.get("ServerName") or "").casefold() == str(server).casefold()
+        ]
+        if remaining:
+            success = False
+            remaining_shares = ", ".join(sorted({str(i.get("ShareName") or "(server)") for i in remaining}))
+            message += "\n仍检测到连接: " + remaining_shares + "。如果它属于映射盘，请先删除对应映射盘。"
+        self.set_status(message, color="green" if success else "red")
+        if success:
+            messagebox.showinfo(self.get_text("remove_success"), message)
+        else:
             messagebox.showerror(self.get_text("remove_error"), message)
 
 

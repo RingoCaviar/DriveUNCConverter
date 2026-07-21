@@ -12,6 +12,13 @@
 
 适用于：局域网共享盘管理、UNC 路径整理、凭据清理，以及 Win11 下“能 Ping 通但无法访问共享”时的排查。
 
+### 本次更新
+
+- 新增 SMB 浏览身份排查与用户名/密码测试，可区分密码错误、共享无权限和 Guest 访问
+- 支持查看、清理可枚举的 SMB 连接，并可按完整 UNC 路径清理隐藏的 1219 冲突连接
+- 添加页面的路径预览支持复制；连续添加共享时保留用户名和密码（关闭软件后失效）
+- 修复网络位置不显示、删除映射后残留红叉驱动器等问题
+
 ### 功能一览
 
 | 功能 | 说明 |
@@ -152,6 +159,13 @@ DriveUNCConverter/
 A Windows utility for bidirectional conversion between **mapped network drives** and **Windows Network Locations**, with direct add / remove support.
 
 Useful for managing LAN shares, organizing UNC paths, clearing credentials, and diagnosing the common Windows 11 case where Ping works but share access fails without credentials.
+
+### Latest Updates
+
+- Added SMB browse-identity diagnostics and credential testing to distinguish invalid passwords, share permission failures, and Guest access
+- Added a list of clearable SMB connections, plus exact-UNC cleanup for hidden error 1219 conflicts
+- UNC path previews are copyable; username and password remain available for consecutive additions until the app closes
+- Fixed missing Network Locations and stale disconnected drives shown with a red X
 
 ### Features
 

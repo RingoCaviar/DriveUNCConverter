@@ -9,16 +9,62 @@ from ctypes import wintypes
 import shutil
 import subprocess
 import re
+import json
 
 
 # Windows API 常量
 CONNECT_UPDATE_PROFILE = 0x1
 RESOURCETYPE_DISK = 0x1
 
+# Windows Network Shortcut attributes. Explorer processes desktop.ini when
+# the location folder is read-only; hiding that folder makes it disappear from
+# "This PC".
+FILE_ATTRIBUTE_READONLY = 0x01
+FILE_ATTRIBUTE_HIDDEN = 0x02
+FILE_ATTRIBUTE_SYSTEM = 0x04
+
+# Shell change notification constants used to refresh Explorer.
+SHCNE_MKDIR = 0x00000008
+SHCNE_RMDIR = 0x00000010
+SHCNE_UPDATEITEM = 0x00002000
+SHCNF_PATHW = 0x0005
+
+RESOURCE_CONNECTED = 0x00000001
+RESOURCEUSAGE_ALL = 0x00000000
+ERROR_NO_MORE_ITEMS = 259
+
+
+class _CONNECTED_NETRESOURCEW(ctypes.Structure):
+    _fields_ = [
+        ("dwScope", wintypes.DWORD),
+        ("dwType", wintypes.DWORD),
+        ("dwDisplayType", wintypes.DWORD),
+        ("dwUsage", wintypes.DWORD),
+        ("lpLocalName", wintypes.LPWSTR),
+        ("lpRemoteName", wintypes.LPWSTR),
+        ("lpComment", wintypes.LPWSTR),
+        ("lpProvider", wintypes.LPWSTR),
+    ]
+
 
 def get_network_shortcuts_path():
     """获取网络位置快捷方式目录"""
     return os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Network Shortcuts')
+
+
+def _notify_explorer(event, path):
+    """Best-effort notification that a Network Shortcut changed."""
+    try:
+        ctypes.windll.shell32.SHChangeNotify(
+            event,
+            SHCNF_PATHW,
+            ctypes.c_wchar_p(path),
+            None,
+        )
+    except Exception:
+        # The filesystem operation already succeeded. A refresh failure should
+        # not make the whole operation fail.
+        pass
 
 
 def normalize_drive_letter(drive_letter):
@@ -90,6 +136,26 @@ def get_network_locations():
             target_lnk = os.path.join(folder_path, 'target.lnk')
             if os.path.exists(target_lnk):
                 try:
+                    # Repair shortcuts made by older versions, which marked
+                    # the entire location folder hidden + system.
+                    folder_attrs = ctypes.windll.kernel32.GetFileAttributesW(folder_path)
+                    needs_repair = (
+                        bool(folder_attrs & FILE_ATTRIBUTE_HIDDEN)
+                        or not bool(folder_attrs & FILE_ATTRIBUTE_READONLY)
+                    )
+                    desktop_ini_path = os.path.join(folder_path, 'desktop.ini')
+                    if os.path.exists(desktop_ini_path):
+                        ctypes.windll.kernel32.SetFileAttributesW(
+                            desktop_ini_path,
+                            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+                        )
+                    ctypes.windll.kernel32.SetFileAttributesW(
+                        folder_path,
+                        FILE_ATTRIBUTE_READONLY,
+                    )
+                    if needs_repair:
+                        _notify_explorer(SHCNE_UPDATEITEM, folder_path)
+
                     import win32com.client
                     shell = win32com.client.Dispatch("WScript.Shell")
                     shortcut = shell.CreateShortcut(target_lnk)
@@ -153,13 +219,12 @@ def create_network_location(name, unc_path):
         os.makedirs(location_folder)
 
         desktop_ini_path = os.path.join(location_folder, 'desktop.ini')
-        with open(desktop_ini_path, 'w', encoding='utf-8') as f:
+        # Explorer's documented desktop.ini format is Unicode (UTF-16 LE with
+        # a BOM), rather than UTF-8.
+        with open(desktop_ini_path, 'w', encoding='utf-16') as f:
             f.write('[.ShellClassInfo]\n')
             f.write('CLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}\n')
             f.write('Flags=2\n')
-
-        # 设置文件夹属性：只读 + 系统
-        ctypes.windll.kernel32.SetFileAttributesW(location_folder, 0x06)
 
         target_lnk_path = os.path.join(location_folder, 'target.lnk')
         import win32com.client
@@ -167,6 +232,19 @@ def create_network_location(name, unc_path):
         shortcut = shell.CreateShortcut(target_lnk_path)
         shortcut.TargetPath = unc_path
         shortcut.Save()
+
+        # Explorer only treats desktop.ini as folder metadata when the folder
+        # has the read-only attribute. desktop.ini itself is hidden + system;
+        # the location folder must not be hidden.
+        ctypes.windll.kernel32.SetFileAttributesW(
+            desktop_ini_path,
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+        )
+        ctypes.windll.kernel32.SetFileAttributesW(
+            location_folder,
+            FILE_ATTRIBUTE_READONLY,
+        )
+        _notify_explorer(SHCNE_MKDIR, location_folder)
 
         return True, f"已创建网络位置: {name}"
     except Exception as e:
@@ -192,7 +270,7 @@ def disconnect_drive(drive_letter, force=False):
         drive_path = drive
         result = ctypes.windll.mpr.WNetCancelConnection2W(
             drive_path,
-            0,
+            CONNECT_UPDATE_PROFILE,
             force
         )
 
@@ -242,6 +320,7 @@ def delete_network_location(name):
             pass
 
         shutil.rmtree(location_folder)
+        _notify_explorer(SHCNE_RMDIR, location_folder)
         return True, f"已删除网络位置: {name}"
     except Exception as e:
         return False, f"删除网络位置失败: {str(e)}"
@@ -755,6 +834,287 @@ def diagnose_server_access(server_or_path, username=None, password=None):
     return info
 
 
+def _get_smb_connections_for_server(server):
+    """使用 Windows SMB 客户端查询指定服务器的当前连接和实际身份。"""
+    if not server:
+        return [], "服务器为空"
+
+    ps_script = r"""
+$target = $env:DRIVEUNC_DIAG_SERVER
+$items = @(Get-SmbConnection -ErrorAction SilentlyContinue |
+    Where-Object { $_.ServerName -ieq $target } |
+    ForEach-Object {
+        [PSCustomObject]@{
+            ServerName = [string]$_.ServerName
+            ShareName  = [string]$_.ShareName
+            UserName   = [string]$_.UserName
+            Credential = [string]$_.Credential
+            Dialect    = [string]$_.Dialect
+            NumOpens   = [int]$_.NumOpens
+        }
+    })
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+ConvertTo-Json -InputObject $items -Compress
+"""
+    env = os.environ.copy()
+    env["DRIVEUNC_DIAG_SERVER"] = str(server)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                ps_script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8-sig",
+            errors="replace",
+            timeout=12,
+            creationflags=creationflags,
+            env=env,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            return [], detail or f"PowerShell 退出码 {completed.returncode}"
+        raw = (completed.stdout or "").strip()
+        if not raw:
+            return [], None
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        return list(parsed or []), None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def get_active_smb_sessions():
+    """Return client SMB connections visible to Get-SmbConnection."""
+    ps_script = r"""
+$items = @(Get-SmbConnection -ErrorAction SilentlyContinue | ForEach-Object {
+    [PSCustomObject]@{
+        ServerName = [string]$_.ServerName
+        ShareName  = [string]$_.ShareName
+        UserName   = [string]$_.UserName
+        Credential = [string]$_.Credential
+        Dialect    = [string]$_.Dialect
+        NumOpens   = [int]$_.NumOpens
+    }
+})
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+ConvertTo-Json -InputObject $items -Compress
+"""
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8-sig",
+            errors="replace",
+            timeout=12,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode != 0:
+            return [], (completed.stderr or completed.stdout or "").strip()
+        raw = (completed.stdout or "").strip()
+        if not raw:
+            return [], None
+        parsed = json.loads(raw)
+        return ([parsed] if isinstance(parsed, dict) else list(parsed or [])), None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def get_clearable_smb_connections():
+    """Merge SMB connections exposed by PowerShell, WNet, and ``net use``."""
+    merged = {}
+    errors = []
+
+    def add(remote, server="", share="", identity="", source=""):
+        remote = str(remote or "").strip().rstrip("\\")
+        if not remote.startswith("\\\\"):
+            return
+        parts = [p for p in remote[2:].split("\\") if p]
+        server = str(server or (parts[0] if parts else "")).strip()
+        share = str(share or ("\\".join(parts[1:]) if len(parts) > 1 else "(server)"))
+        key = remote.casefold()
+        item = merged.setdefault(key, {
+            "ServerName": server,
+            "ShareName": share,
+            "RemoteName": remote,
+            "UserName": identity,
+            "Credential": "",
+            "Dialect": "",
+            "NumOpens": 0,
+            "Sources": [],
+            "LocalName": "",
+        })
+        if identity and not item.get("UserName"):
+            item["UserName"] = identity
+        if source and source not in item["Sources"]:
+            item["Sources"].append(source)
+
+    smb_items, smb_error = get_active_smb_sessions()
+    if smb_error:
+        errors.append("Get-SmbConnection: " + smb_error)
+    for item in smb_items:
+        server = str(item.get("ServerName") or "")
+        share = str(item.get("ShareName") or "")
+        remote = _server_unc(server) + (("\\" + share) if share else "")
+        add(remote, server, share, item.get("UserName") or item.get("Credential"), "Get-SmbConnection")
+        current = merged.get(remote.rstrip("\\").casefold())
+        if current:
+            current.update({k: item.get(k, current.get(k)) for k in ("Credential", "Dialect", "NumOpens")})
+
+    enum_handle = wintypes.HANDLE()
+    try:
+        result = ctypes.windll.mpr.WNetOpenEnumW(
+            RESOURCE_CONNECTED, RESOURCETYPE_DISK, RESOURCEUSAGE_ALL, None, ctypes.byref(enum_handle)
+        )
+        if result == 0:
+            try:
+                while True:
+                    size = wintypes.DWORD(64 * 1024)
+                    buffer = ctypes.create_string_buffer(size.value)
+                    count = wintypes.DWORD(0xFFFFFFFF)
+                    result = ctypes.windll.mpr.WNetEnumResourceW(enum_handle, ctypes.byref(count), buffer, ctypes.byref(size))
+                    if result == ERROR_NO_MORE_ITEMS:
+                        break
+                    if result != 0:
+                        errors.append(f"WNet: Windows error {result}")
+                        break
+                    resources = ctypes.cast(buffer, ctypes.POINTER(_CONNECTED_NETRESOURCEW))
+                    for index in range(count.value):
+                        remote = resources[index].lpRemoteName or ""
+                        add(remote, source="WNet")
+                        key = remote.rstrip("\\").casefold()
+                        if key in merged:
+                            merged[key]["LocalName"] = resources[index].lpLocalName or ""
+            finally:
+                ctypes.windll.mpr.WNetCloseEnum(enum_handle)
+        else:
+            errors.append(f"WNet: Windows error {result}")
+    except Exception as exc:
+        errors.append("WNet: " + str(exc))
+
+    try:
+        completed = subprocess.run(
+            ["net", "use"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=12,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        # UNC text itself is language-independent. Two-or-more spaces delimit
+        # the provider/status columns while allowing spaces inside share names.
+        for line in output.splitlines():
+            match = re.search(r"(\\\\[^\\\s]+\\.+?)(?=\s{2,}\S|$)", line.rstrip())
+            if match:
+                add(match.group(1).strip(), source="net use")
+    except Exception as exc:
+        errors.append("net use: " + str(exc))
+
+    items = sorted(merged.values(), key=lambda i: (i["ServerName"].casefold(), i["ShareName"].casefold()))
+    return items, ("; ".join(errors) if errors else None)
+
+
+def diagnose_share_browse_identity(server_or_path):
+    """
+    诊断不输入账号密码时仍可浏览共享的原因。
+
+    该函数只读取连接/凭据状态并执行一次无显式凭据的共享枚举，
+    不会删除或断开任何连接。
+    """
+    server = normalize_server_name(server_or_path)
+    if not server:
+        return False, "请输入有效的服务器 IP 或主机名"
+
+    before, before_error = _get_smb_connections_for_server(server)
+    saved_credentials = list_saved_credentials_for_server(server)
+    browse_ok, browse_message, shares = list_server_shares(
+        server,
+        username=None,
+        password=None,
+        include_hidden=False,
+        include_special=False,
+    )
+    after, after_error = _get_smb_connections_for_server(server)
+
+    lines = [f"SMB 浏览身份排查: \\{server}", ""]
+    lines.append("1. 排查前的活动 SMB 连接")
+    if before:
+        for item in before:
+            share = item.get("ShareName") or "(服务器会话)"
+            identity = item.get("UserName") or item.get("Credential") or "(未报告)"
+            dialect = item.get("Dialect") or "?"
+            lines.append(f"  - \\{server}\\{share} | 身份: {identity} | SMB {dialect}")
+    elif before_error:
+        lines.append(f"  - 无法读取: {before_error}")
+    else:
+        lines.append("  - 未发现")
+
+    lines.extend(["", "2. Windows 凭据管理器"])
+    if saved_credentials:
+        lines.extend(f"  - {target}" for target in saved_credentials)
+    else:
+        lines.append("  - 未发现该服务器的已保存凭据")
+
+    lines.extend(["", "3. 不提供用户名/密码的共享枚举"])
+    if browse_ok:
+        names = ", ".join(item.get("name", "") for item in shares) or "(无可见共享)"
+        lines.append(f"  - 枚举成功: {names}")
+    else:
+        first_line = (browse_message or "枚举失败").splitlines()[0]
+        lines.append(f"  - 枚举失败: {first_line}")
+
+    new_connections = []
+    before_keys = {
+        ((item.get("ServerName") or "").casefold(), (item.get("ShareName") or "").casefold())
+        for item in before
+    }
+    for item in after:
+        key = ((item.get("ServerName") or "").casefold(), (item.get("ShareName") or "").casefold())
+        if key not in before_keys:
+            new_connections.append(item)
+
+    lines.extend(["", "4. 结论"])
+    if before and browse_ok:
+        identities = sorted({
+            item.get("UserName") or item.get("Credential") or "未知身份"
+            for item in before
+        })
+        lines.append("原因: Windows 复用了排查前已存在的 SMB 会话。")
+        lines.append("当前身份: " + ", ".join(identities))
+    elif new_connections and browse_ok:
+        identities = sorted({
+            item.get("UserName") or item.get("Credential") or "未知身份"
+            for item in new_connections
+        })
+        lines.append("原因: 枚举共享时 Windows 自动建立了 SMB 会话。")
+        lines.append("实际身份: " + ", ".join(identities))
+        if saved_credentials:
+            lines.append("可能来源: 已保存凭据，或当前 Windows 登录身份自动通过验证。")
+        else:
+            lines.append("可能来源: 当前 Windows 登录身份被服务器接受，或服务器将其转为 Guest。")
+    elif browse_ok:
+        lines.append("原因: 在未检测到可见 SMB 会话的情况下仍可枚举共享。")
+        lines.append("服务器很可能允许 Guest/匿名用户查看共享名称。")
+        lines.append("注意: 能看到共享名称不代表能访问共享内容。")
+    else:
+        lines.append("当前无法在不提供凭据的情况下枚举共享。")
+
+    if after_error and not after:
+        lines.append(f"补充: 枚举后 SMB 身份查询失败: {after_error}")
+    lines.extend([
+        "",
+        "说明: 本排查不会断开会话或删除凭据。",
+        "共享列表的可见性与具体文件夹的读写权限是两项独立检查。",
+    ])
+    return True, "\n".join(lines)
+
+
 def build_share_access_error_message(
     server_or_path,
     error_code=None,
@@ -980,6 +1340,130 @@ def _disconnect_server_connection(remote):
         ctypes.windll.mpr.WNetCancelConnection2W(remote, 0, True)
     except Exception:
         pass
+
+
+def test_share_credentials(unc_path, username, password):
+    """Test credentials against one concrete share without saving them.
+
+    The temporary connection is removed before returning.  A server root is
+    deliberately rejected because successful share enumeration does not prove
+    that the account can open a particular share.
+    """
+    unc = normalize_unc_path(unc_path)
+    user = (username or "").strip()
+    if not unc or len([part for part in unc.lstrip("\\").split("\\") if part]) < 2:
+        return False, "请输入完整共享路径，例如：\\\\192.168.1.10\\B"
+    if not user:
+        return False, "请输入要测试的用户名"
+
+    server = normalize_server_name(unc)
+    before, before_error = _get_smb_connections_for_server(server)
+    if before:
+        current = sorted({
+            str(item.get("UserName") or item.get("Credential") or "未知身份")
+            for item in before
+        })
+        return False, "\n".join([
+            f"凭证测试目标: {unc}",
+            f"提交的用户名: {user}",
+            "",
+            "结果: 检测到这台服务器已有 SMB 会话，未执行测试。",
+            "Windows 可能直接复用旧会话，从而产生“密码正确”的假结果。",
+            "当前连接身份: " + ", ".join(current),
+            "请先在删除页面清理该服务器的残留 SMB 会话，再重新测试。",
+        ])
+
+    class NETRESOURCEW(ctypes.Structure):
+        _fields_ = [
+            ("dwScope", wintypes.DWORD),
+            ("dwType", wintypes.DWORD),
+            ("dwDisplayType", wintypes.DWORD),
+            ("dwUsage", wintypes.DWORD),
+            ("lpLocalName", wintypes.LPWSTR),
+            ("lpRemoteName", wintypes.LPWSTR),
+            ("lpComment", wintypes.LPWSTR),
+            ("lpProvider", wintypes.LPWSTR),
+        ]
+
+    resource = NETRESOURCEW()
+    resource.dwType = RESOURCETYPE_DISK
+    resource.lpRemoteName = unc
+    result = ctypes.windll.mpr.WNetAddConnection2W(
+        ctypes.byref(resource),
+        password if password is not None else "",
+        user,
+        0,
+    )
+
+    created = result == 0
+    try:
+        after, after_error = _get_smb_connections_for_server(server)
+        lines = [
+            f"凭证测试目标: {unc}",
+            f"提交的用户名: {user}",
+            "凭证不会保存。",
+            "",
+        ]
+
+        if result == 0:
+            identities = sorted({
+                str(item.get("UserName") or item.get("Credential") or "").strip()
+                for item in after
+                if item.get("UserName") or item.get("Credential")
+            })
+            guest = any(name.lower().endswith(("\\guest", "/guest")) or name.lower() == "guest" for name in identities)
+            if guest:
+                lines.extend([
+                    "结果: 连接成功，但服务器实际使用 Guest（来宾）身份。",
+                    "这不能证明输入的用户名和密码正确；服务器可能启用了来宾回退。",
+                ])
+                ok = False
+            else:
+                lines.extend([
+                    "结果: 凭证验证成功，并且该账号可以连接此共享。",
+                    "实际 SMB 身份: " + (", ".join(identities) if identities else "系统未返回身份；连接 API 已确认成功"),
+                ])
+                ok = True
+        elif result == 1219:
+            lines.extend([
+                "结果: 无法独立测试（Windows 错误 1219）。",
+                "当前 Windows 会话已经用另一套身份连接了这台服务器。请先在删除页面清理该服务器的残留 SMB 会话，再测试。",
+            ])
+            if before:
+                current = sorted({str(item.get("UserName") or item.get("Credential") or "未知身份") for item in before})
+                lines.append("当前连接身份: " + ", ".join(current))
+            ok = False
+        elif result in (86, 1326, 1909):
+            lines.extend([
+                f"结果: 用户名或密码不正确（Windows 错误 {result}）。",
+                "也可能是账号被锁定、禁用，或不允许网络登录。",
+            ])
+            ok = False
+        elif result == 5:
+            lines.extend([
+                "结果: 服务器拒绝访问（Windows 错误 5）。",
+                "账号可能存在，但没有该共享的共享权限或 NTFS 权限；这不等同于密码一定错误。",
+            ])
+            ok = False
+        elif result in (53, 67):
+            lines.extend([
+                f"结果: 找不到服务器或共享（Windows 错误 {result}）。",
+                "请检查 IP、共享名和 SMB 服务。",
+            ])
+            ok = False
+        else:
+            lines.extend([
+                f"结果: 测试失败（Windows 错误 {result}）。",
+                build_share_access_error_message(unc, error_code=result, username=user, password=password),
+            ])
+            ok = False
+
+        if before_error or after_error:
+            lines.extend(["", "身份读取提示: " + (after_error or before_error)])
+        return ok, "\n".join(lines)
+    finally:
+        if created:
+            _disconnect_server_connection(unc)
 
 
 def list_server_shares(
@@ -1302,6 +1786,138 @@ def list_saved_credentials_for_server(server):
     return targets
 
 
+def disconnect_server_sessions(unc_path, force=True):
+    """断开指定服务器上没有绑定盘符的 SMB 连接。
+
+    同一服务器上的其他映射驱动器会保留，避免清理凭据时误断用户的
+    其他盘符。
+
+    Returns:
+        tuple: (成功与否, 消息, 已断开的远程路径列表)
+    """
+    server = normalize_server_name(unc_path) or extract_unc_server(unc_path)
+    if not server:
+        return False, "无法从路径解析服务器名称，未能断开 SMB 会话", []
+
+    server_root = _server_unc(server).rstrip("\\")
+    server_prefix = server_root.casefold() + "\\"
+    exact_unc = normalize_unc_path(unc_path)
+    enum_handle = wintypes.HANDLE()
+    open_result = ctypes.windll.mpr.WNetOpenEnumW(
+        RESOURCE_CONNECTED,
+        RESOURCETYPE_DISK,
+        RESOURCEUSAGE_ALL,
+        None,
+        ctypes.byref(enum_handle),
+    )
+    if open_result != 0:
+        return False, f"枚举服务器 SMB 会话失败，错误代码: {open_result}", []
+
+    candidates = []
+    protected_remotes = set()
+    try:
+        while True:
+            buffer_size = wintypes.DWORD(64 * 1024)
+            buffer = ctypes.create_string_buffer(buffer_size.value)
+            count = wintypes.DWORD(0xFFFFFFFF)
+            result = ctypes.windll.mpr.WNetEnumResourceW(
+                enum_handle,
+                ctypes.byref(count),
+                buffer,
+                ctypes.byref(buffer_size),
+            )
+            if result == ERROR_NO_MORE_ITEMS:
+                break
+            if result != 0:
+                return False, f"枚举服务器 SMB 会话失败，错误代码: {result}", []
+
+            resources = ctypes.cast(
+                buffer,
+                ctypes.POINTER(_CONNECTED_NETRESOURCEW),
+            )
+            for index in range(count.value):
+                local_name = resources[index].lpLocalName
+                remote_name = resources[index].lpRemoteName
+                if not remote_name:
+                    continue
+                remote_key = remote_name.rstrip("\\").casefold()
+                if local_name:
+                    protected_remotes.add(remote_key)
+                    continue
+                if remote_key == server_root.casefold() or remote_key.startswith(server_prefix):
+                    candidates.append(remote_name.rstrip("\\"))
+    finally:
+        ctypes.windll.mpr.WNetCloseEnum(enum_handle)
+
+    # Root/IPC$ connections are the common credential-bearing sessions. Add
+    # them as best-effort targets even if the provider omitted them from the
+    # connected-resource enumeration.
+    # Get-SmbConnection can see connections that WNetEnumResource omits. Add
+    # their exact share paths, while preserving connections backed by a drive.
+    smb_connections, _smb_error = _get_smb_connections_for_server(server)
+    for item in smb_connections:
+        share = str(item.get("ShareName") or "").strip("\\")
+        if share:
+            remote = server_root + "\\" + share
+            if remote.casefold() not in protected_remotes:
+                candidates.append(remote)
+
+    # The redirector may retain a connection for one exact share while neither
+    # Get-SmbConnection nor WNetEnumResource exposes it.  Include the original
+    # full UNC supplied by the user so paths with spaces/non-ASCII names are
+    # cancelled directly.
+    if exact_unc and exact_unc.casefold() not in protected_remotes:
+        candidates.append(exact_unc)
+    candidates.extend([server_root + "\\IPC$", server_root])
+    candidates = list(dict.fromkeys(candidates))
+
+    disconnected = []
+    failed = []
+    for remote in candidates:
+        result = ctypes.windll.mpr.WNetCancelConnection2W(remote, 0, force)
+        if result == 0:
+            disconnected.append(remote)
+        elif result == 2250:
+            # Some redirector-only connections cause ERROR_SESSION_CREDENTIAL_CONFLICT
+            # but are invisible to WNet enumeration/cancellation. `net use` can
+            # still remove them when addressed by their exact UNC.
+            try:
+                completed = subprocess.run(
+                    ["net", "use", remote, "/delete", "/y"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=12,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if completed.returncode == 0:
+                    disconnected.append(remote)
+            except Exception:
+                pass
+        else:
+            failed.append((remote, result))
+
+    if failed:
+        details = ", ".join(f"{path} (错误码 {code})" for path, code in failed)
+        if disconnected:
+            return True, (
+                f"已断开 {len(disconnected)} 个残留 SMB 会话；"
+                f"部分断开失败: {details}"
+            ), disconnected
+        return False, f"断开残留 SMB 会话失败: {details}", []
+    if disconnected:
+        return True, f"已断开 {len(disconnected)} 个残留 SMB 会话", disconnected
+    return True, f"未发现服务器 {server} 的残留 SMB 会话", []
+
+
+def clear_server_authentication_state(unc_path):
+    """断开无盘符 SMB 会话并删除与服务器相关的已保存凭据。"""
+    session_ok, session_msg, _sessions = disconnect_server_sessions(unc_path)
+    cred_ok, cred_msg, _credentials = delete_credentials_for_unc(unc_path)
+    return session_ok and cred_ok, session_msg + "\n- " + cred_msg
+
+
 def delete_credentials_for_unc(unc_path):
     """
     删除与 UNC 路径对应服务器相关的已保存凭据。
@@ -1400,11 +2016,11 @@ def remove_network_drive(drive_letter, force=False, delete_credentials=False):
 
     message = f"已删除网络驱动器: {drive} → {unc}"
     if delete_credentials:
-        cred_ok, cred_msg, _deleted = delete_credentials_for_unc(unc)
-        if cred_ok:
-            message += f"\n- {cred_msg}"
+        cleanup_ok, cleanup_msg = clear_server_authentication_state(unc)
+        if cleanup_ok:
+            message += f"\n- {cleanup_msg}"
         else:
-            message += f"\n- 凭据删除失败: {cred_msg}"
+            message += f"\n- SMB 会话/凭据清理不完整: {cleanup_msg}"
     return True, message
 
 
@@ -1433,11 +2049,11 @@ def remove_network_location_item(location_name, delete_credentials=False):
 
     message = f"已删除网络位置: {location_name} ({unc})"
     if delete_credentials:
-        cred_ok, cred_msg, _deleted = delete_credentials_for_unc(unc)
-        if cred_ok:
-            message += f"\n- {cred_msg}"
+        cleanup_ok, cleanup_msg = clear_server_authentication_state(unc)
+        if cleanup_ok:
+            message += f"\n- {cleanup_msg}"
         else:
-            message += f"\n- 凭据删除失败: {cred_msg}"
+            message += f"\n- SMB 会话/凭据清理不完整: {cleanup_msg}"
     return True, message
 
 
