@@ -27,6 +27,7 @@
 | 网络位置 → 驱动器 | 将网络位置映射为驱动器（可选盘符），并删除原网络位置 |
 | 添加网络驱动器 / 位置 | 支持完整 UNC，或仅 IP 后浏览共享再添加 |
 | 删除网络驱动器 / 位置 | 断开驱动器 / 删除网络位置，可选同时删除凭据 |
+| Windows 凭据管理器 | 从删除页直接打开当前用户的 Windows 凭据管理器 |
 | 浏览共享 | 只知道 IP 时，枚举对方共享文件夹并点选 |
 | 访问失败诊断 | 检测 Ping、SMB 445/139、凭据情况，给出具体原因与建议 |
 | 多语言 | 中文 / 英文界面切换 |
@@ -175,6 +176,7 @@ Useful for managing LAN shares, organizing UNC paths, clearing credentials, and 
 | Network Location → Drive | Map a free drive letter and remove the Network Location |
 | Add drive / location | Full UNC, or IP-only + Browse Shares |
 | Remove drive / location | Disconnect drive / delete location; optional credential cleanup |
+| Windows Credential Manager | Open the current user's Credential Manager from the Remove tab |
 | Browse Shares | Enumerate remote shares when only an IP/hostname is known |
 | Access diagnostics | Check Ping, SMB 445/139, credentials, and show concrete reasons |
 | Multi-language | Chinese / English UI |

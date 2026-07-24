@@ -27,6 +27,7 @@ from drive_utils import (
     test_share_credentials,
     get_clearable_smb_connections,
     disconnect_server_sessions,
+    open_windows_credential_manager,
 )
 
 
@@ -113,6 +114,9 @@ LANGUAGES = {
         "testing_credentials": '正在测试用户名和密码...',
         "test_credentials_title": 'SMB 凭证测试',
         "clear_current_sessions": '清理当前连接',
+        "open_credential_manager": '🔐 凭据管理器',
+        "credential_manager_opened": '已打开 Windows 凭据管理器',
+        "credential_manager_error": '无法打开凭据管理器',
         "confirm_clear_current_sessions": '确定清理 {unc} 所属服务器的无盘符 SMB 连接吗？\n\n软件会直接尝试断开完整共享路径、IPC$ 和服务器根连接；已有映射盘会保留。',
         "add_browsing_shares": '正在浏览共享...',
         "add_shares_label": '可用共享（点击选择）:',
@@ -210,6 +214,9 @@ LANGUAGES = {
         "testing_credentials": 'Testing username and password...',
         "test_credentials_title": 'SMB Credential Test',
         "clear_current_sessions": 'Clear Connections',
+        "open_credential_manager": '🔐 Credential Manager',
+        "credential_manager_opened": 'Windows Credential Manager opened',
+        "credential_manager_error": 'Cannot Open Credential Manager',
         "confirm_clear_current_sessions": 'Clear drive-less SMB connections for {unc}?\n\nThe exact share, IPC$, and server root will be tried. Existing mapped drives are preserved.',
         "add_browsing_shares": 'Browsing shares...',
         "add_shares_label": 'Available shares (click to select):',
@@ -1323,6 +1330,17 @@ class DriveNetworkConverter(ctk.CTk):
             command=self.on_refresh,
         ).pack(side="right")
 
+        ctk.CTkButton(
+            header,
+            text=self.get_text("open_credential_manager"),
+            width=140,
+            height=28,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=12),
+            fg_color="#455a64",
+            hover_color="#37474f",
+            command=self.on_open_credential_manager,
+        ).pack(side="right", padx=(0, 8))
+
         options = ctk.CTkFrame(tab, fg_color="transparent")
         options.pack(fill="x", pady=(0, 8))
 
@@ -1636,6 +1654,16 @@ class DriveNetworkConverter(ctk.CTk):
 
 
     # ==================== 通用方法 ====================
+
+    def on_open_credential_manager(self):
+        """打开当前 Windows 用户的凭据管理器。"""
+        success, message = open_windows_credential_manager()
+        if success:
+            self.set_status(self.get_text("credential_manager_opened"), color="green")
+            return
+
+        self.set_status(message, color="red")
+        messagebox.showerror(self.get_text("credential_manager_error"), message)
     
     def on_refresh(self):
         """刷新所有数据"""

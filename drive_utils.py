@@ -52,6 +52,29 @@ def get_network_shortcuts_path():
     return os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Network Shortcuts')
 
 
+def open_windows_credential_manager():
+    """打开 Windows 凭据管理器。返回 ``(success, message)``。"""
+    if os.name != "nt":
+        return False, "凭据管理器仅在 Windows 系统上可用"
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    commands = (
+        ["control.exe", "/name", "Microsoft.CredentialManager"],
+        ["rundll32.exe", "keymgr.dll,KRShowKeyMgr"],
+    )
+    errors = []
+
+    for command in commands:
+        try:
+            subprocess.Popen(command, creationflags=creationflags)
+            return True, "已打开 Windows 凭据管理器"
+        except OSError as exc:
+            errors.append(str(exc))
+
+    detail = "; ".join(errors) if errors else "未知错误"
+    return False, f"无法打开 Windows 凭据管理器: {detail}"
+
+
 def _notify_explorer(event, path):
     """Best-effort notification that a Network Shortcut changed."""
     try:
