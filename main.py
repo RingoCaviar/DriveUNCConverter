@@ -28,6 +28,8 @@ from drive_utils import (
     get_clearable_smb_connections,
     disconnect_server_sessions,
     open_windows_credential_manager,
+    diagnose_drive_reconnect,
+    repair_drive_reconnect,
 )
 
 
@@ -81,6 +83,7 @@ LANGUAGES = {
         "tab_loc_to_drive": '网络位置 → 驱动器',
         "tab_add": '添加网络驱动器/位置',
         "tab_remove": '删除网络驱动器/位置',
+        "tab_repair": '重连修复',
         "mapped_drives": '💿 映射的网络驱动器',
         "network_locations": '📁 网络位置',
         "refresh": '🔄 刷新',
@@ -138,6 +141,7 @@ LANGUAGES = {
         "add_username_placeholder": '可选，需要认证时填写',
         "add_password_placeholder": '可选',
         "add_persistent": '登录后重新连接',
+        "add_save_credential": '保存到 Windows 凭据管理器',
         "add_button": '添加',
         "adding": '正在添加...',
         "add_success": '添加成功',
@@ -172,6 +176,21 @@ LANGUAGES = {
         "remove_also_credentials": '断开残留 SMB 会话并删除相关凭据',
         "cred_note_yes": '\n• 断开该服务器残留的无盘符 SMB 会话\n• 同时删除相关 Windows 凭据',
         "cred_note_no": '',
+        "repair_title": '🛠 映射盘重连诊断与修复',
+        "repair_drive": '映射盘:',
+        "repair_diagnose": '诊断',
+        "repair_username": '用户名:',
+        "repair_password": '密码:',
+        "repair_button": '分析后修复',
+        "repair_no_drive": '没有可诊断的映射网络驱动器',
+        "repair_ready": '选择映射盘并点击“诊断”',
+        "repair_confirm_title": '确认重连修复',
+        "repair_confirm": '将断开并重建以下映射，并替换该服务器的保存凭据：\n\n{report}\n\n⚠️ 如果驱动器正被文件或程序占用，修复将强制断开；未保存的数据可能丢失。\n\n确认继续吗？',
+        "repair_success": '重连修复完成',
+        "repair_error": '重连修复失败',
+        "repair_credentials_required": '请输入用于重连的用户名和密码',
+        "repair_test_deferred": '检测到现有 SMB 会话，Windows 无法在不先断开的情况下独立验证新密码；将在确认后的重建阶段验证。',
+        "repair_tip": '修复会保存精确匹配 UNC 服务器的当前用户凭据，并重建持久映射。不会修改组策略或创建启动任务。',
     },
     "en": {
         "window_title": 'Drive ↔ Network Location Converter',
@@ -181,6 +200,7 @@ LANGUAGES = {
         "tab_loc_to_drive": 'Network Location → Drive',
         "tab_add": 'Add Drive/Location',
         "tab_remove": 'Remove Drive/Location',
+        "tab_repair": 'Reconnect Repair',
         "mapped_drives": '💿 Mapped Network Drives',
         "network_locations": '📁 Network Locations',
         "refresh": '🔄 Refresh',
@@ -238,6 +258,7 @@ LANGUAGES = {
         "add_username_placeholder": 'Optional, if authentication is required',
         "add_password_placeholder": 'Optional',
         "add_persistent": 'Reconnect at sign-in',
+        "add_save_credential": 'Save in Windows Credential Manager',
         "add_button": 'Add',
         "adding": 'Adding...',
         "add_success": 'Added Successfully',
@@ -272,6 +293,21 @@ LANGUAGES = {
         "remove_also_credentials": 'Disconnect leftover SMB sessions and delete related credentials',
         "cred_note_yes": '\n• Disconnect leftover SMB sessions without drive letters\n• Also delete related Windows credentials',
         "cred_note_no": '',
+        "repair_title": '🛠 Mapped Drive Reconnect Diagnosis and Repair',
+        "repair_drive": 'Mapped drive:',
+        "repair_diagnose": 'Diagnose',
+        "repair_username": 'Username:',
+        "repair_password": 'Password:',
+        "repair_button": 'Review and Repair',
+        "repair_no_drive": 'No mapped network drive is available',
+        "repair_ready": 'Select a mapped drive and click Diagnose',
+        "repair_confirm_title": 'Confirm Reconnect Repair',
+        "repair_confirm": 'The mapping below will be disconnected and rebuilt, and the saved credential for its server will be replaced:\n\n{report}\n\n⚠️ If files or applications are using the drive, repair will force-disconnect it and unsaved data may be lost.\n\nContinue?',
+        "repair_success": 'Reconnect Repair Completed',
+        "repair_error": 'Reconnect Repair Failed',
+        "repair_credentials_required": 'Enter the username and password used to reconnect',
+        "repair_test_deferred": 'An existing SMB session prevents an isolated password test without disconnecting it first. The credential will be verified during the confirmed rebuild.',
+        "repair_tip": 'Repair saves a current-user credential that exactly matches the UNC server and rebuilds a persistent mapping. It does not change Group Policy or create startup tasks.',
     }
 }
 
@@ -387,16 +423,18 @@ class DriveNetworkConverter(ctk.CTk):
             font=ctk.CTkFont(family=SYSTEM_FONT, size=14)
         )
         
-        # 创建四个选项卡
+        # 创建选项卡
         self.tab_drive_to_loc = self.tabview.add(self.get_text("tab_drive_to_loc"))
         self.tab_loc_to_drive = self.tabview.add(self.get_text("tab_loc_to_drive"))
         self.tab_add = self.tabview.add(self.get_text("tab_add"))
+        self.tab_repair = self.tabview.add(self.get_text("tab_repair"))
         self.tab_remove = self.tabview.add(self.get_text("tab_remove"))
         
         # 构建选项卡内容
         self.create_drive_to_location_tab()
         self.create_location_to_drive_tab()
         self.create_add_tab()
+        self.create_repair_tab()
         self.create_remove_tab()
         
         # ===== 状态栏 =====
@@ -942,6 +980,15 @@ class DriveNetworkConverter(ctk.CTk):
         )
         self.add_persistent_check.pack(side="left", padx=(20, 0))
 
+        self.add_save_credential_var = ctk.BooleanVar(value=False)
+        self.add_save_credential_check = ctk.CTkCheckBox(
+            drive_inner,
+            text=self.get_text("add_save_credential"),
+            variable=self.add_save_credential_var,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.add_save_credential_check.pack(anchor="w", pady=(4, 0))
+
         # Location options frame
         self.add_location_options = ctk.CTkFrame(form, fg_color=("#efe8f5", "#2a1f36"))
         self.add_location_options.pack(fill="x", pady=(0, 10))
@@ -1247,9 +1294,20 @@ class DriveNetworkConverter(ctk.CTk):
         username = self.add_username_entry.get().strip() if mode in ("drive", "both") else None
         password = self.add_password_entry.get() if mode in ("drive", "both") else None
         persistent = self.add_persistent_var.get() if mode in ("drive", "both") else True
+        save_credential = (
+            self.add_save_credential_var.get()
+            if mode in ("drive", "both") and hasattr(self, "add_save_credential_var")
+            else False
+        )
 
         if mode in ("drive", "both") and not drive_letter:
             messagebox.showerror(self.get_text("add_error"), self.get_text("error_no_drive_add"))
+            return
+        if save_credential and (not username or not password):
+            messagebox.showerror(
+                self.get_text("add_error"),
+                self.get_text("repair_credentials_required"),
+            )
             return
 
         mode_desc_key = {
@@ -1288,6 +1346,7 @@ class DriveNetworkConverter(ctk.CTk):
             username=username or None,
             password=password or None,
             persistent=persistent,
+            save_credential=save_credential,
         )
 
         if success:
@@ -1304,6 +1363,213 @@ class DriveNetworkConverter(ctk.CTk):
             self.set_status(f"❌ {first_line}", color="red")
             self.show_detail_error(self.get_text("add_error"), message)
 
+
+
+    # ==================== 重连修复 选项卡 ====================
+
+    def create_repair_tab(self):
+        tab = self.tab_repair
+        body = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        body.pack(fill="both", expand=True, pady=(10, 10))
+
+        ctk.CTkLabel(
+            body,
+            text=self.get_text("repair_title"),
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=16),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        drive_row = ctk.CTkFrame(body, fg_color="transparent")
+        drive_row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(
+            drive_row,
+            text=self.get_text("repair_drive"),
+            width=90,
+            anchor="w",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).pack(side="left")
+        drive_values = [drive for drive, _ in self.mapped_drives] or [""]
+        self.repair_drive_var = ctk.StringVar(value=drive_values[0])
+        self.repair_drive_combo = ctk.CTkComboBox(
+            drive_row,
+            values=drive_values,
+            variable=self.repair_drive_var,
+            width=110,
+            height=32,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.repair_drive_combo.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(
+            drive_row,
+            text=self.get_text("repair_diagnose"),
+            width=100,
+            height=32,
+            command=self.on_diagnose_reconnect,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).pack(side="left")
+
+        self.repair_report_box = ctk.CTkTextbox(
+            body,
+            height=220,
+            wrap="word",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.repair_report_box.pack(fill="both", expand=True, pady=(0, 10))
+        self._set_repair_report(
+            self.get_text("repair_ready") if self.mapped_drives else self.get_text("repair_no_drive")
+        )
+
+        credential_frame = ctk.CTkFrame(body)
+        credential_frame.pack(fill="x", pady=(0, 10))
+        credential_inner = ctk.CTkFrame(credential_frame, fg_color="transparent")
+        credential_inner.pack(fill="x", padx=12, pady=12)
+
+        ctk.CTkLabel(
+            credential_inner,
+            text=self.get_text("repair_username"),
+            width=90,
+            anchor="w",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.repair_username_entry = ctk.CTkEntry(
+            credential_inner,
+            height=32,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.repair_username_entry.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(
+            credential_inner,
+            text=self.get_text("repair_password"),
+            width=90,
+            anchor="w",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).grid(row=1, column=0, sticky="w")
+        self.repair_password_entry = ctk.CTkEntry(
+            credential_inner,
+            height=32,
+            show="*",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.repair_password_entry.grid(row=1, column=1, sticky="ew")
+        credential_inner.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkButton(
+            body,
+            text=self.get_text("repair_button"),
+            width=160,
+            height=36,
+            command=self.on_repair_reconnect,
+            fg_color="#2e7d32",
+            hover_color="#1b5e20",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=14),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            body,
+            text=self.get_text("repair_tip"),
+            wraplength=760,
+            justify="left",
+            text_color="gray",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=12),
+        ).pack(fill="x", pady=(10, 0))
+        self._last_reconnect_diagnosis = None
+
+    def _set_repair_report(self, message):
+        if not hasattr(self, "repair_report_box"):
+            return
+        self.repair_report_box.configure(state="normal")
+        self.repair_report_box.delete("1.0", "end")
+        self.repair_report_box.insert("1.0", str(message or ""))
+        self.repair_report_box.configure(state="disabled")
+
+    def update_repair_drives(self):
+        if not hasattr(self, "repair_drive_combo"):
+            return
+        values = [drive for drive, _ in self.mapped_drives] or [""]
+        self.repair_drive_combo.configure(values=values)
+        if self.repair_drive_var.get() not in values:
+            self.repair_drive_var.set(values[0])
+
+    def on_diagnose_reconnect(self):
+        drive = self.repair_drive_var.get().strip()
+        if not drive:
+            self._set_repair_report(self.get_text("repair_no_drive"))
+            return
+        self.set_status(self.get_text("repair_diagnose"), color="yellow")
+        self.update()
+        success, result = diagnose_drive_reconnect(drive)
+        if success:
+            self._last_reconnect_diagnosis = result
+            self._set_repair_report(result.format_report())
+            self.set_status(self.get_text("refreshed"), color="green")
+        else:
+            self._last_reconnect_diagnosis = None
+            self._set_repair_report(result)
+            self.set_status(result, color="red")
+
+    def on_repair_reconnect(self):
+        drive = self.repair_drive_var.get().strip()
+        username = self.repair_username_entry.get().strip()
+        password = self.repair_password_entry.get()
+        if not drive:
+            messagebox.showerror(self.get_text("repair_error"), self.get_text("repair_no_drive"))
+            return
+        if not username or not password:
+            messagebox.showerror(
+                self.get_text("repair_error"),
+                self.get_text("repair_credentials_required"),
+            )
+            return
+
+        diag_ok, diagnosis = diagnose_drive_reconnect(drive)
+        if not diag_ok:
+            self.show_detail_error(self.get_text("repair_error"), diagnosis)
+            return
+        report = diagnosis.format_report()
+        test_ok, test_report = test_share_credentials(
+            diagnosis.unc_path,
+            username,
+            password,
+        )
+        existing_session_deferred = (
+            "已有 SMB 会话" in test_report
+            or "existing SMB session" in test_report
+        )
+        if not test_ok and not existing_session_deferred:
+            self._set_repair_report(report + "\n\n" + test_report)
+            self.show_detail_error(self.get_text("repair_error"), test_report)
+            return
+        if existing_session_deferred:
+            report += "\n\n" + self.get_text("repair_test_deferred")
+        else:
+            report += "\n\n" + test_report
+
+        if not messagebox.askyesno(
+            self.get_text("repair_confirm_title"),
+            self.get_text("repair_confirm").format(report=report),
+            icon="warning",
+        ):
+            return
+
+        self.set_status(self.get_text("repair_button"), color="yellow")
+        self.update()
+        success, message = repair_drive_reconnect(
+            drive,
+            username,
+            password,
+            save_credential=True,
+        )
+        self.repair_password_entry.delete(0, "end")
+        self._set_repair_report(message)
+        self.refresh_data()
+        self.update_repair_drives()
+        self.update_drives_list()
+        self.update_remove_lists()
+        if success:
+            self.set_status(self.get_text("repair_success"), color="green")
+            messagebox.showinfo(self.get_text("repair_success"), message)
+        else:
+            self.set_status(self.get_text("repair_error"), color="red")
+            self.show_detail_error(self.get_text("repair_error"), message)
 
 
     # ==================== 删除网络驱动器/位置 选项卡 ====================
@@ -1671,6 +1937,7 @@ class DriveNetworkConverter(ctk.CTk):
         self.update_drives_list()
         self.update_locations_list()
         self.update_add_drive_letters()
+        self.update_repair_drives()
         self.update_remove_lists()
         self.set_status(self.get_text("refreshed"), color="green")
     

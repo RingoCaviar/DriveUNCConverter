@@ -14,6 +14,8 @@
 
 ### 本次更新
 
+- 新增“重连修复”页，诊断持久映射、凭据目标、SMB 445 和身份冲突，并可确认后重建映射
+- 新增映射可明确选择把账号密码保存到当前用户的 Windows 凭据管理器，解决重启后重复要求密码
 - 新增 SMB 浏览身份排查与用户名/密码测试，可区分密码错误、共享无权限和 Guest 访问
 - 支持查看、清理可枚举的 SMB 连接，并可按完整 UNC 路径清理隐藏的 1219 冲突连接
 - 添加页面的路径预览支持复制；连续添加共享时保留用户名和密码（关闭软件后失效）
@@ -26,6 +28,7 @@
 | 驱动器 → 网络位置 | 将已映射网络驱动器转为网络位置快捷方式，并断开原盘符 |
 | 网络位置 → 驱动器 | 将网络位置映射为驱动器（可选盘符），并删除原网络位置 |
 | 添加网络驱动器 / 位置 | 支持完整 UNC，或仅 IP 后浏览共享再添加 |
+| 重连修复 | 修复重启后红叉或重复要求密码的持久映射 |
 | 删除网络驱动器 / 位置 | 断开驱动器 / 删除网络位置，可选同时删除凭据 |
 | Windows 凭据管理器 | 从删除页直接打开当前用户的 Windows 凭据管理器 |
 | 浏览共享 | 只知道 IP 时，枚举对方共享文件夹并点选 |
@@ -78,6 +81,7 @@ python main.py
    - 可选勾选“显示隐藏共享 `$`”（如 `C$`、`ADMIN$` 等）
 4. 选择添加类型：
    - **网络驱动器**：选择盘符，可选“登录后重新连接”
+   - 如需重启后自动认证，明确勾选“保存到 Windows 凭据管理器”
    - **网络位置**：可自定义名称，留空则自动生成
    - **同时添加两者**
 5. 点击添加并确认。
@@ -85,9 +89,19 @@ python main.py
 说明：
 
 - 账号密码主要用于**映射驱动器**和**浏览共享**
+- 密码通过 Windows 凭据 API 保存，不写入配置文件、日志或命令行参数
 - 若路径错误、无权限或凭据冲突，失败对话框会展示具体原因（可复制）
 
-#### 3. 删除网络驱动器 / 位置
+#### 3. 重连修复
+
+1. 打开 **重连修复** 选项卡并选择映射盘。
+2. 点击 **诊断**，查看持久映射、精确凭据目标、SMB 445 和当前连接身份。
+3. 输入正确的用户名和密码，点击 **分析后修复**。
+4. 阅读将执行的操作并确认；程序会清理冲突会话、保存精确匹配 UNC 服务器的凭据并重建持久映射。
+
+如果诊断显示映射与凭据均正常，但开机后仅短暂出现红叉，通常是网络初始化较慢。程序会给出“计算机启动和登录时始终等待网络”的建议，但不会自动修改组策略。
+
+#### 4. 删除网络驱动器 / 位置
 
 1. 打开 **删除网络驱动器/位置** 选项卡。
 2. 如需下次重新输入账号密码，勾选：
@@ -100,7 +114,7 @@ python main.py
 - 删除后，下次再添加同一服务器共享时，必须重新输入用户名和密码
 - 适合账号变更、密码更新，或想清掉错误凭据的场景
 
-#### 4. 访问失败诊断（常见于 Win11）
+#### 5. 访问失败诊断（常见于 Win11）
 
 很多情况下主机 IP **可以 Ping 通**，但未输入账号密码时会提示“无法访问服务器”。这通常不是网络不通，而是认证 / 策略 / 端口问题。
 
@@ -163,6 +177,8 @@ Useful for managing LAN shares, organizing UNC paths, clearing credentials, and 
 
 ### Latest Updates
 
+- Added a Reconnect Repair tab that diagnoses persistence, credential targets, SMB 445, and identity conflicts before rebuilding a mapping
+- New mappings can explicitly save credentials in the current user's Windows Credential Manager to prevent password prompts after restart
 - Added SMB browse-identity diagnostics and credential testing to distinguish invalid passwords, share permission failures, and Guest access
 - Added a list of clearable SMB connections, plus exact-UNC cleanup for hidden error 1219 conflicts
 - UNC path previews are copyable; username and password remain available for consecutive additions until the app closes
@@ -175,6 +191,7 @@ Useful for managing LAN shares, organizing UNC paths, clearing credentials, and 
 | Drive → Network Location | Convert a mapped drive into a Network Location shortcut and disconnect it |
 | Network Location → Drive | Map a free drive letter and remove the Network Location |
 | Add drive / location | Full UNC, or IP-only + Browse Shares |
+| Reconnect repair | Repair persistent mappings that show a red X or request a password after restart |
 | Remove drive / location | Disconnect drive / delete location; optional credential cleanup |
 | Windows Credential Manager | Open the current user's Credential Manager from the Remove tab |
 | Browse Shares | Enumerate remote shares when only an IP/hostname is known |
@@ -223,6 +240,7 @@ Close open files on the target path before converting. If the drive is busy, you
    - optionally show hidden `$` shares
 4. Choose mode:
    - **Network drive** (drive letter + optional reconnect)
+   - Explicitly enable **Save in Windows Credential Manager** when automatic authentication after restart is required
    - **Network location** (optional custom name)
    - **Both**
 5. Confirm to apply.
@@ -230,9 +248,19 @@ Close open files on the target path before converting. If the drive is busy, you
 Notes:
 
 - Credentials are mainly used for **drive mapping** and **share browsing**
+- Passwords saved by this option use the Windows credential API and are not written to configuration, logs, or command-line arguments
 - On failure, a detailed dialog explains the reason (copy supported)
 
-#### 3. Remove Network Drive / Location
+#### 3. Reconnect Repair
+
+1. Open **Reconnect Repair**, select a mapped drive, and click **Diagnose**.
+2. Review persistence, exact credential-target matching, SMB 445, and active identities.
+3. Enter the correct username and password and choose **Review and Repair**.
+4. Confirm the displayed operations. The app clears conflicting sessions, stores a credential matching the UNC server exactly, and rebuilds the persistent mapping.
+
+If the configuration is healthy and the red X is only temporary at sign-in, network initialization may be late. The app recommends the Windows “Always wait for the network” policy but does not change Group Policy automatically.
+
+#### 4. Remove Network Drive / Location
 
 1. Open the **Remove** tab.
 2. Optionally enable:
@@ -245,7 +273,7 @@ Notes:
 - Next time you add a share on the same server, username/password must be entered again
 - Useful after password changes or bad cached credentials
 
-#### 4. Failure Diagnostics (Common on Win11)
+#### 5. Failure Diagnostics (Common on Win11)
 
 It is common for an IP to respond to Ping while share access fails without credentials. This is usually authentication, policy, or port related—not “network down”.
 

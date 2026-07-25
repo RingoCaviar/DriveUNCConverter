@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import re
 import json
+from dataclasses import dataclass, field
 
 
 # Windows API 常量
@@ -32,6 +33,57 @@ SHCNF_PATHW = 0x0005
 RESOURCE_CONNECTED = 0x00000001
 RESOURCEUSAGE_ALL = 0x00000000
 ERROR_NO_MORE_ITEMS = 259
+
+
+@dataclass
+class DriveReconnectDiagnosis:
+    """Structured diagnosis for one persistent mapped-drive connection."""
+
+    drive_letter: str
+    unc_path: str
+    server: str
+    persistent: bool
+    saved_credential_targets: list[str] = field(default_factory=list)
+    saved_credential_users: list[str] = field(default_factory=list)
+    credential_target_match: bool = False
+    active_identities: list[str] = field(default_factory=list)
+    conflicting_identities: list[str] = field(default_factory=list)
+    other_server_drives: list[str] = field(default_factory=list)
+    smb445_open: bool | None = None
+    issues: list[str] = field(default_factory=list)
+    recommendations: list[str] = field(default_factory=list)
+
+    @property
+    def healthy(self):
+        return not self.issues
+
+    def format_report(self):
+        status = "正常" if self.healthy else "需要修复"
+        lines = [
+            f"重连诊断: {self.drive_letter} → {self.unc_path}",
+            f"状态: {status}",
+            f"持久映射: {'是' if self.persistent else '否'}",
+            f"SMB 445: {'开放' if self.smb445_open else '不可达'}",
+            "匹配凭据: " + (
+                ", ".join(self.saved_credential_targets)
+                if self.credential_target_match
+                else "未找到"
+            ),
+            "当前 SMB 身份: " + (
+                ", ".join(self.active_identities) if self.active_identities else "未报告"
+            ),
+        ]
+        if self.saved_credential_users:
+            lines.append("保存的用户名: " + ", ".join(self.saved_credential_users))
+        if self.other_server_drives:
+            lines.append("同服务器其他映射: " + ", ".join(self.other_server_drives))
+        if self.issues:
+            lines.extend(["", "发现的问题:"])
+            lines.extend(f"- {item}" for item in self.issues)
+        if self.recommendations:
+            lines.extend(["", "建议:"])
+            lines.extend(f"- {item}" for item in self.recommendations)
+        return "\n".join(lines)
 
 
 class _CONNECTED_NETRESOURCEW(ctypes.Structure):
@@ -628,6 +680,7 @@ def add_network_drive_or_location(
     username=None,
     password=None,
     persistent=True,
+    save_credential=False,
 ):
     """
     添加网络驱动器或/和网络位置。
@@ -640,6 +693,7 @@ def add_network_drive_or_location(
         username: 映射驱动器时可选用户名
         password: 映射驱动器时可选密码
         persistent: 是否保持连接
+        save_credential: 是否将凭据保存到当前用户的 Windows 凭据管理器
 
     Returns:
         tuple: (成功与否, 消息)
@@ -655,6 +709,11 @@ def add_network_drive_or_location(
     results = []
 
     if mode in {"drive", "both"}:
+        if save_credential and (not (username or "").strip() or password in (None, "")):
+            return False, "保存凭据需要同时填写用户名和密码"
+
+        server = extract_unc_server(unc_path)
+        old_credential = _read_windows_credential(server) if save_credential else None
         ok, msg = add_network_drive(
             unc_path,
             drive_letter,
@@ -665,6 +724,14 @@ def add_network_drive_or_location(
         if not ok:
             return False, msg
         results.append(msg)
+
+        if save_credential:
+            cred_ok, cred_msg = save_windows_credential(server, username, password)
+            if not cred_ok:
+                disconnect_drive(drive_letter, force=False)
+                _restore_windows_credential(server, old_credential)
+                return False, f"映射已撤销：{cred_msg}"
+            results.append(cred_msg)
 
     if mode in {"location", "both"}:
         ok, msg, _name = add_network_location(unc_path, location_name=location_name)
@@ -1807,6 +1874,357 @@ def list_saved_credentials_for_server(server):
         pass
 
     return targets
+
+
+def _read_windows_credential(server):
+    """Read the exact server credential for rollback; never formats its secret."""
+    if not server:
+        return None
+    try:
+        import win32cred
+
+        return win32cred.CredRead(
+            str(server),
+            getattr(win32cred, "CRED_TYPE_DOMAIN_PASSWORD", 2),
+            0,
+        )
+    except Exception:
+        return None
+
+
+def _restore_windows_credential(server, credential):
+    """Best-effort restore/delete used by transactional mapping operations."""
+    try:
+        import win32cred
+
+        cred_type = getattr(win32cred, "CRED_TYPE_DOMAIN_PASSWORD", 2)
+        if credential:
+            restored = {
+                key: credential[key]
+                for key in (
+                    "Type",
+                    "TargetName",
+                    "Comment",
+                    "CredentialBlob",
+                    "Persist",
+                    "Attributes",
+                    "TargetAlias",
+                    "UserName",
+                )
+                if key in credential
+            }
+            win32cred.CredWrite(restored, 0)
+        else:
+            try:
+                win32cred.CredDelete(str(server), cred_type, 0)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def save_windows_credential(server, username, password):
+    """Save an SMB credential for the exact UNC server in the current profile."""
+    target = str(server or "").strip().strip("\\/")
+    user = str(username or "").strip()
+    if not target:
+        return False, "无法保存凭据：服务器名称为空"
+    if not user or password in (None, ""):
+        return False, "无法保存凭据：用户名和密码不能为空"
+
+    try:
+        import win32cred
+
+        credential = {
+            "Type": getattr(win32cred, "CRED_TYPE_DOMAIN_PASSWORD", 2),
+            "TargetName": target,
+            "UserName": user,
+            "CredentialBlob": str(password),
+            "Persist": getattr(win32cred, "CRED_PERSIST_LOCAL_MACHINE", 2),
+            "Comment": "DriveUNCConverter persistent SMB mapping",
+        }
+        win32cred.CredWrite(credential, 0)
+        saved = win32cred.CredRead(
+            target,
+            getattr(win32cred, "CRED_TYPE_DOMAIN_PASSWORD", 2),
+            0,
+        )
+        if str(saved.get("TargetName") or "").casefold() != target.casefold():
+            return False, "Windows 凭据管理器未返回刚写入的目标"
+        if str(saved.get("UserName") or "").casefold() != user.casefold():
+            return False, "Windows 凭据管理器中的用户名与写入值不一致"
+        return True, f"已将 {target} 的凭据保存到 Windows 凭据管理器"
+    except Exception as exc:
+        return False, f"保存 Windows 凭据失败: {exc}"
+
+
+def _credential_details_for_server(server):
+    """Return target/user metadata only; credential blobs are never exposed."""
+    details = []
+    server_key = str(server or "").strip().casefold()
+    if not server_key:
+        return details
+    try:
+        import win32cred
+
+        for cred in win32cred.CredEnumerate(None, 0):
+            target = str(cred.get("TargetName") or "")
+            bare = target.casefold()
+            for prefix in ("domain:target=", "legacygeneric:target="):
+                if bare.startswith(prefix):
+                    bare = bare[len(prefix):]
+            if bare.strip("\\/") == server_key:
+                details.append({
+                    "target": target,
+                    "username": str(cred.get("UserName") or ""),
+                    "exact": True,
+                })
+    except Exception:
+        pass
+
+    known_targets = list_saved_credentials_for_server(server)
+    existing = {item["target"].casefold() for item in details}
+    for target in known_targets:
+        if target.casefold() not in existing:
+            bare = target.casefold()
+            for prefix in ("domain:target=", "legacygeneric:target="):
+                if bare.startswith(prefix):
+                    bare = bare[len(prefix):]
+            details.append({
+                "target": target,
+                "username": "",
+                "exact": bare.strip("\\/") == server_key,
+            })
+    return details
+
+
+def _persistent_mapping_details(drive_letter):
+    drive = normalize_drive_letter(drive_letter)
+    if not drive:
+        return False, None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Network\{drive[0]}") as key:
+            remote, _ = winreg.QueryValueEx(key, "RemotePath")
+            return True, normalize_unc_path(remote)
+    except Exception:
+        return False, None
+
+
+def diagnose_drive_reconnect(drive_letter):
+    """Diagnose persistence, credentials, connectivity and SMB identity."""
+    drive = normalize_drive_letter(drive_letter)
+    if not drive:
+        return False, "无效的驱动器盘符"
+    persistent, profile_unc = _persistent_mapping_details(drive)
+    unc = drive_to_unc(drive)
+    if not unc:
+        for mapped_drive, mapped_unc in get_mapped_drives():
+            if normalize_drive_letter(mapped_drive) == drive:
+                unc = mapped_unc
+                break
+    if not unc:
+        unc = profile_unc
+    unc = normalize_unc_path(unc)
+    if not unc:
+        return False, f"无法读取驱动器 {drive} 的 UNC 映射"
+    server = extract_unc_server(unc)
+    if persistent and profile_unc and profile_unc.casefold() != unc.casefold():
+        persistent = False
+
+    credential_details = _credential_details_for_server(server)
+    exact_details = [item for item in credential_details if item["exact"]]
+    smb_connections, _ = _get_smb_connections_for_server(server)
+    identities = sorted({
+        str(item.get("UserName") or item.get("Credential") or "").strip()
+        for item in smb_connections
+        if item.get("UserName") or item.get("Credential")
+    })
+    saved_users = sorted({item["username"] for item in exact_details if item["username"]})
+    conflicts = []
+    if len({item.casefold() for item in identities}) > 1:
+        conflicts = identities
+    elif identities and saved_users and not any(
+        active.casefold() == saved.casefold()
+        for active in identities
+        for saved in saved_users
+    ):
+        conflicts = identities
+
+    other_drives = []
+    for other_drive, other_unc in get_mapped_drives():
+        normalized_other = normalize_drive_letter(other_drive)
+        other_server = extract_unc_server(other_unc)
+        if (
+            normalized_other != drive
+            and other_server
+            and other_server.casefold() == server.casefold()
+        ):
+            other_drives.append(f"{normalized_other} → {other_unc}")
+
+    diagnosis = DriveReconnectDiagnosis(
+        drive_letter=drive,
+        unc_path=unc,
+        server=server,
+        persistent=persistent,
+        saved_credential_targets=[item["target"] for item in exact_details],
+        saved_credential_users=saved_users,
+        credential_target_match=bool(exact_details),
+        active_identities=identities,
+        conflicting_identities=conflicts,
+        other_server_drives=other_drives,
+        smb445_open=_tcp_port_open(server, 445),
+    )
+    if not diagnosis.persistent:
+        diagnosis.issues.append("该盘符没有与当前 UNC 一致的持久映射配置")
+    if not diagnosis.credential_target_match:
+        diagnosis.issues.append(f"未找到目标精确为 {server} 的 Windows 凭据")
+    if not diagnosis.smb445_open:
+        diagnosis.issues.append("服务器 SMB 445 端口当前不可达")
+    if diagnosis.conflicting_identities:
+        diagnosis.issues.append("当前 SMB 身份与保存凭据不一致，可能触发错误 1219")
+    if diagnosis.other_server_drives:
+        diagnosis.recommendations.append("修复前确认同服务器的其他映射盘使用相同账号")
+    if diagnosis.persistent and diagnosis.credential_target_match and not diagnosis.conflicting_identities:
+        diagnosis.recommendations.append(
+            "配置看起来正常；若仅开机暂时显示红叉，可能是网络初始化较慢，可启用“计算机启动和登录时始终等待网络”"
+        )
+    else:
+        diagnosis.recommendations.append("输入正确账号密码后执行重连修复")
+    return True, diagnosis
+
+
+def _disconnect_drive_for_repair(drive_letter):
+    """Disconnect a drive, including stale persistent mappings shown with a red X."""
+    ok, message = disconnect_drive(drive_letter, force=False)
+    if ok:
+        return ok, message
+    if "文件正在使用" in message or "错误代码: 2401" in message:
+        forced_ok, forced_message = disconnect_drive(drive_letter, force=True)
+        if forced_ok:
+            return True, f"{forced_message}（检测到文件占用，已强制断开）"
+        return False, f"{message}\n强制断开也失败: {forced_message}"
+    if "错误代码: 2250" not in message and "未连接" not in message:
+        return ok, message
+    drive = normalize_drive_letter(drive_letter)
+    try:
+        completed = subprocess.run(
+            ["net", "use", drive, "/delete", "/y"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode == 0:
+            return True, f"已移除断开状态的持久映射 {drive}"
+    except Exception:
+        pass
+    return False, message
+
+
+def repair_drive_reconnect(drive_letter, username, password, save_credential=True):
+    """Transactionally rebuild one drive mapping and its exact-server credential."""
+    user = str(username or "").strip()
+    if not user or password in (None, ""):
+        return False, "修复重连需要同时填写用户名和密码"
+    ok, diagnosis_or_message = diagnose_drive_reconnect(drive_letter)
+    if not ok:
+        return False, diagnosis_or_message
+    diagnosis = diagnosis_or_message
+
+    entered_identity_conflict = (
+        diagnosis.active_identities
+        and not any(identity.casefold() == user.casefold() for identity in diagnosis.active_identities)
+    )
+    if diagnosis.other_server_drives and (
+        diagnosis.conflicting_identities or entered_identity_conflict
+    ):
+        return False, (
+            "检测到同服务器其他映射盘和身份冲突。为避免中断其他盘符，未执行修复。\n"
+            + "\n".join(f"- {item}" for item in diagnosis.other_server_drives)
+        )
+
+    old_credential = _read_windows_credential(diagnosis.server)
+    steps = []
+    disconnected, disconnect_msg = _disconnect_drive_for_repair(diagnosis.drive_letter)
+    if not disconnected:
+        return False, disconnect_msg
+    steps.append(disconnect_msg)
+
+    sessions_ok, sessions_msg, _ = disconnect_server_sessions(diagnosis.unc_path, force=True)
+    steps.append(sessions_msg)
+    if not sessions_ok:
+        map_network_drive_with_credentials(
+            diagnosis.drive_letter,
+            diagnosis.unc_path,
+            username=None,
+            password=None,
+            persistent=diagnosis.persistent,
+        )
+        return False, "\n".join(steps + ["修复已停止，并已尝试恢复原映射"])
+
+    if save_credential:
+        cred_ok, cred_msg = save_windows_credential(diagnosis.server, user, password)
+        steps.append(cred_msg)
+        if not cred_ok:
+            _restore_windows_credential(diagnosis.server, old_credential)
+            map_network_drive_with_credentials(
+                diagnosis.drive_letter,
+                diagnosis.unc_path,
+                username=None,
+                password=None,
+                persistent=diagnosis.persistent,
+            )
+            return False, "\n".join(steps + ["凭据保存失败，已尝试恢复原配置"])
+
+    mapped, map_msg = map_network_drive_with_credentials(
+        diagnosis.drive_letter,
+        diagnosis.unc_path,
+        username=user,
+        password=password,
+        persistent=True,
+    )
+    steps.append(map_msg)
+    if not mapped:
+        if save_credential:
+            _restore_windows_credential(diagnosis.server, old_credential)
+        restored, restore_msg = map_network_drive_with_credentials(
+            diagnosis.drive_letter,
+            diagnosis.unc_path,
+            username=None,
+            password=None,
+            persistent=diagnosis.persistent,
+        )
+        steps.append(
+            ("已恢复原映射: " if restored else "原映射恢复失败: ") + restore_msg
+        )
+        return False, "\n".join(steps)
+
+    verify_ok, verify_result = diagnose_drive_reconnect(diagnosis.drive_letter)
+    if not verify_ok or not verify_result.persistent or (
+        save_credential and not verify_result.credential_target_match
+    ):
+        disconnect_drive(diagnosis.drive_letter, force=False)
+        if save_credential:
+            _restore_windows_credential(diagnosis.server, old_credential)
+        restored, restore_msg = map_network_drive_with_credentials(
+            diagnosis.drive_letter,
+            diagnosis.unc_path,
+            username=None,
+            password=None,
+            persistent=diagnosis.persistent,
+        )
+        steps.append("持久配置验证未通过，已撤销本次修复")
+        steps.append(
+            ("已恢复原映射: " if restored else "原映射恢复失败: ") + restore_msg
+        )
+        return False, "\n".join(steps)
+    steps.append("验证成功：持久映射和精确服务器凭据均已就绪")
+    return True, "\n".join(steps)
 
 
 def disconnect_server_sessions(unc_path, force=True):
