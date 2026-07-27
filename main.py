@@ -30,6 +30,10 @@ from drive_utils import (
     open_windows_credential_manager,
     diagnose_drive_reconnect,
     repair_drive_reconnect,
+    normalize_account_identity,
+    ACCOUNT_SCOPE_TARGET,
+    ACCOUNT_SCOPE_DOMAIN,
+    ACCOUNT_SCOPE_MICROSOFT,
 )
 
 
@@ -140,6 +144,12 @@ LANGUAGES = {
         "add_password": '密码:',
         "add_username_placeholder": '可选，需要认证时填写',
         "add_password_placeholder": '可选',
+        "account_scope": '账户归属:',
+        "account_scope_target": '目标电脑本地账户（默认）',
+        "account_scope_domain": 'AD 域或完整账户',
+        "account_scope_microsoft": 'Microsoft 账户',
+        "account_preview": '实际连接账户: {username}',
+        "account_preview_empty": '实际连接账户: 未填写',
         "add_persistent": '登录后重新连接',
         "add_save_credential": '保存到 Windows 凭据管理器',
         "add_button": '添加',
@@ -188,7 +198,9 @@ LANGUAGES = {
         "repair_confirm": '将断开并重建以下映射，并替换该服务器的保存凭据：\n\n{report}\n\n⚠️ 如果驱动器正被文件或程序占用，修复将强制断开；未保存的数据可能丢失。\n\n确认继续吗？',
         "repair_success": '重连修复完成',
         "repair_error": '重连修复失败',
-        "repair_credentials_required": '请输入用于重连的用户名和密码',
+        "repair_credentials_required": '请输入用于重连的用户名；没有已保存密码时还需填写密码',
+        "repair_password_optional": '可留空以优先复用已保存密码',
+        "repair_reuse_password": '将优先复用 Windows 凭据管理器中已保存的密码。',
         "repair_test_deferred": '检测到现有 SMB 会话，Windows 无法在不先断开的情况下独立验证新密码；将在确认后的重建阶段验证。',
         "repair_tip": '修复会保存精确匹配 UNC 服务器的当前用户凭据，并重建持久映射。不会修改组策略或创建启动任务。',
     },
@@ -257,6 +269,12 @@ LANGUAGES = {
         "add_password": 'Password:',
         "add_username_placeholder": 'Optional, if authentication is required',
         "add_password_placeholder": 'Optional',
+        "account_scope": 'Account scope:',
+        "account_scope_target": 'Target computer local account (default)',
+        "account_scope_domain": 'AD domain or full identity',
+        "account_scope_microsoft": 'Microsoft account',
+        "account_preview": 'Effective identity: {username}',
+        "account_preview_empty": 'Effective identity: not entered',
         "add_persistent": 'Reconnect at sign-in',
         "add_save_credential": 'Save in Windows Credential Manager',
         "add_button": 'Add',
@@ -305,7 +323,9 @@ LANGUAGES = {
         "repair_confirm": 'The mapping below will be disconnected and rebuilt, and the saved credential for its server will be replaced:\n\n{report}\n\n⚠️ If files or applications are using the drive, repair will force-disconnect it and unsaved data may be lost.\n\nContinue?',
         "repair_success": 'Reconnect Repair Completed',
         "repair_error": 'Reconnect Repair Failed',
-        "repair_credentials_required": 'Enter the username and password used to reconnect',
+        "repair_credentials_required": 'Enter a username; a password is required only when none is saved',
+        "repair_password_optional": 'Leave blank to reuse the saved password first',
+        "repair_reuse_password": 'The saved Windows credential password will be reused first.',
         "repair_test_deferred": 'An existing SMB session prevents an isolated password test without disconnecting it first. The credential will be verified during the confirmed rebuild.',
         "repair_tip": 'Repair saves a current-user credential that exactly matches the UNC server and rebuilds a persistent mapping. It does not change Group Policy or create startup tasks.',
     }
@@ -769,6 +789,7 @@ class DriveNetworkConverter(ctk.CTk):
             font=ctk.CTkFont(family=SYSTEM_FONT, size=14),
         )
         self.add_unc_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.add_unc_entry.bind("<KeyRelease>", lambda _event: self._schedule_add_account_preview())
 
         self.add_browse_btn = ctk.CTkButton(
             unc_row,
@@ -808,6 +829,26 @@ class DriveNetworkConverter(ctk.CTk):
         cred_inner = ctk.CTkFrame(self.add_cred_options, fg_color="transparent")
         cred_inner.pack(fill="x", padx=12, pady=10)
 
+        scope_row = ctk.CTkFrame(cred_inner, fg_color="transparent")
+        scope_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            scope_row,
+            text=self.get_text("account_scope"),
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).pack(side="left", padx=(0, 8))
+        self.add_account_scope_var = ctk.StringVar(value=self.get_text("account_scope_target"))
+        self.add_account_scope_combo = ctk.CTkComboBox(
+            scope_row,
+            values=self._account_scope_labels(),
+            variable=self.add_account_scope_var,
+            state="readonly",
+            width=260,
+            height=32,
+            command=lambda _value: self._schedule_add_account_preview(),
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.add_account_scope_combo.pack(side="left")
+
         cred_row = ctk.CTkFrame(cred_inner, fg_color="transparent")
         cred_row.pack(fill="x")
 
@@ -826,6 +867,7 @@ class DriveNetworkConverter(ctk.CTk):
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         )
         self.add_username_entry.pack(fill="x", pady=(4, 0))
+        self.add_username_entry.bind("<KeyRelease>", lambda _event: self._schedule_add_account_preview())
 
         pass_col = ctk.CTkFrame(cred_row, fg_color="transparent")
         pass_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
@@ -843,6 +885,15 @@ class DriveNetworkConverter(ctk.CTk):
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         )
         self.add_password_entry.pack(fill="x", pady=(4, 0))
+
+        self.add_account_preview_label = ctk.CTkLabel(
+            cred_inner,
+            text=self.get_text("account_preview_empty"),
+            anchor="w",
+            text_color=("#356035", "#9bc49b"),
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=12),
+        )
+        self.add_account_preview_label.pack(fill="x", pady=(8, 0))
 
         cred_action_row = ctk.CTkFrame(cred_inner, fg_color="transparent")
         cred_action_row.pack(fill="x", pady=(10, 0))
@@ -1042,6 +1093,55 @@ class DriveNetworkConverter(ctk.CTk):
         self.on_add_mode_changed()
 
 
+    def _account_scope_labels(self):
+        return [
+            self.get_text("account_scope_target"),
+            self.get_text("account_scope_domain"),
+            self.get_text("account_scope_microsoft"),
+        ]
+
+    def _account_scope_value(self, selected):
+        labels = self._account_scope_labels()
+        values = [ACCOUNT_SCOPE_TARGET, ACCOUNT_SCOPE_DOMAIN, ACCOUNT_SCOPE_MICROSOFT]
+        try:
+            return values[labels.index(selected)]
+        except ValueError:
+            return ACCOUNT_SCOPE_TARGET
+
+    def _normalized_ui_identity(self, raw_path, username, selected_scope):
+        server = normalize_server_name(raw_path)
+        if not username:
+            return True, "", ""
+        if not server:
+            return False, "", self.get_text("error_no_server")
+        return normalize_account_identity(
+            server, username, self._account_scope_value(selected_scope)
+        )
+
+    def _update_add_account_preview(self):
+        if not hasattr(self, "add_account_preview_label"):
+            return
+        raw = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
+        username = self.add_username_entry.get().strip() if hasattr(self, "add_username_entry") else ""
+        selected = self.add_account_scope_var.get()
+        ok, identity, error = self._normalized_ui_identity(raw, username, selected)
+        if not username:
+            text = self.get_text("account_preview_empty")
+        elif ok:
+            text = self.get_text("account_preview").format(username=identity)
+        else:
+            text = error
+        self.add_account_preview_label.configure(text=text, text_color=("#356035", "#9bc49b") if ok else "#d05a5a")
+
+    def _schedule_add_account_preview(self):
+        pending = getattr(self, "_add_account_preview_after", None)
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._add_account_preview_after = self.after(400, self._update_add_account_preview)
+
     def on_browse_shares(self):
         """根据 IP/主机名浏览对方共享文件夹"""
         raw = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
@@ -1052,6 +1152,12 @@ class DriveNetworkConverter(ctk.CTk):
 
         username = self.add_username_entry.get().strip() if hasattr(self, "add_username_entry") else ""
         password = self.add_password_entry.get() if hasattr(self, "add_password_entry") else ""
+        identity_ok, username, identity_error = self._normalized_ui_identity(
+            raw, username, self.add_account_scope_var.get()
+        )
+        if not identity_ok:
+            messagebox.showerror(self.get_text("add_error"), identity_error)
+            return
         include_hidden = (
             self.add_include_hidden_var.get()
             if hasattr(self, "add_include_hidden_var")
@@ -1119,6 +1225,12 @@ class DriveNetworkConverter(ctk.CTk):
         unc = self.add_unc_entry.get().strip() if hasattr(self, "add_unc_entry") else ""
         username = self.add_username_entry.get().strip() if hasattr(self, "add_username_entry") else ""
         password = self.add_password_entry.get() if hasattr(self, "add_password_entry") else ""
+        identity_ok, username, identity_error = self._normalized_ui_identity(
+            unc, username, self.add_account_scope_var.get()
+        )
+        if not identity_ok:
+            messagebox.showerror(self.get_text("add_error"), identity_error)
+            return
 
         self.set_status(self.get_text("testing_credentials"), color="yellow")
         self.add_test_credentials_btn.configure(state="disabled")
@@ -1293,6 +1405,7 @@ class DriveNetworkConverter(ctk.CTk):
         )
         username = self.add_username_entry.get().strip() if mode in ("drive", "both") else None
         password = self.add_password_entry.get() if mode in ("drive", "both") else None
+        account_scope = self._account_scope_value(self.add_account_scope_var.get())
         persistent = self.add_persistent_var.get() if mode in ("drive", "both") else True
         save_credential = (
             self.add_save_credential_var.get()
@@ -1309,6 +1422,14 @@ class DriveNetworkConverter(ctk.CTk):
                 self.get_text("repair_credentials_required"),
             )
             return
+        normalized_username = username
+        if mode in ("drive", "both") and username:
+            identity_ok, normalized_username, identity_error = normalize_account_identity(
+                unc, username, account_scope
+            )
+            if not identity_ok:
+                messagebox.showerror(self.get_text("add_error"), identity_error)
+                return
 
         mode_desc_key = {
             "drive": "add_mode_drive_desc",
@@ -1320,8 +1441,8 @@ class DriveNetworkConverter(ctk.CTk):
         extra_parts = []
         if mode in ("drive", "both"):
             extra_parts.append(f"{self.get_text('add_drive_letter')} {drive_letter}")
-            if username:
-                extra_parts.append(f"{self.get_text('add_username')} {username}")
+            if normalized_username:
+                extra_parts.append(f"{self.get_text('add_username')} {normalized_username}")
         if mode in ("location", "both"):
             name_preview = location_name or suggest_location_name(unc)
             extra_parts.append(f"{self.get_text('add_location_name')} {name_preview}")
@@ -1347,6 +1468,7 @@ class DriveNetworkConverter(ctk.CTk):
             password=password or None,
             persistent=persistent,
             save_credential=save_credential,
+            account_scope=account_scope,
         )
 
         if success:
@@ -1426,31 +1548,50 @@ class DriveNetworkConverter(ctk.CTk):
 
         ctk.CTkLabel(
             credential_inner,
-            text=self.get_text("repair_username"),
+            text=self.get_text("account_scope"),
             width=90,
             anchor="w",
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.repair_account_scope_var = ctk.StringVar(value=self.get_text("account_scope_target"))
+        self.repair_account_scope_combo = ctk.CTkComboBox(
+            credential_inner,
+            values=self._account_scope_labels(),
+            variable=self.repair_account_scope_var,
+            state="readonly",
+            height=32,
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        )
+        self.repair_account_scope_combo.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+
+        ctk.CTkLabel(
+            credential_inner,
+            text=self.get_text("repair_username"),
+            width=90,
+            anchor="w",
+            font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
         self.repair_username_entry = ctk.CTkEntry(
             credential_inner,
             height=32,
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         )
-        self.repair_username_entry.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        self.repair_username_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
         ctk.CTkLabel(
             credential_inner,
             text=self.get_text("repair_password"),
             width=90,
             anchor="w",
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
-        ).grid(row=1, column=0, sticky="w")
+        ).grid(row=2, column=0, sticky="w")
         self.repair_password_entry = ctk.CTkEntry(
             credential_inner,
             height=32,
             show="*",
+            placeholder_text=self.get_text("repair_password_optional"),
             font=ctk.CTkFont(family=SYSTEM_FONT, size=13),
         )
-        self.repair_password_entry.grid(row=1, column=1, sticky="ew")
+        self.repair_password_entry.grid(row=2, column=1, sticky="ew")
         credential_inner.grid_columnconfigure(1, weight=1)
 
         ctk.CTkButton(
@@ -1500,6 +1641,12 @@ class DriveNetworkConverter(ctk.CTk):
         if success:
             self._last_reconnect_diagnosis = result
             self._set_repair_report(result.format_report())
+            suggested = result.suggested_username or (
+                result.saved_credential_users[0] if len(result.saved_credential_users) == 1 else result.persistent_username
+            )
+            if suggested:
+                self.repair_username_entry.delete(0, "end")
+                self.repair_username_entry.insert(0, suggested)
             self.set_status(self.get_text("refreshed"), color="green")
         else:
             self._last_reconnect_diagnosis = None
@@ -1513,7 +1660,7 @@ class DriveNetworkConverter(ctk.CTk):
         if not drive:
             messagebox.showerror(self.get_text("repair_error"), self.get_text("repair_no_drive"))
             return
-        if not username or not password:
+        if not username:
             messagebox.showerror(
                 self.get_text("repair_error"),
                 self.get_text("repair_credentials_required"),
@@ -1525,23 +1672,34 @@ class DriveNetworkConverter(ctk.CTk):
             self.show_detail_error(self.get_text("repair_error"), diagnosis)
             return
         report = diagnosis.format_report()
-        test_ok, test_report = test_share_credentials(
-            diagnosis.unc_path,
-            username,
-            password,
+        account_scope = self._account_scope_value(self.repair_account_scope_var.get())
+        identity_ok, normalized_username, identity_error = normalize_account_identity(
+            diagnosis.server, username, account_scope
         )
-        existing_session_deferred = (
-            "已有 SMB 会话" in test_report
-            or "existing SMB session" in test_report
-        )
-        if not test_ok and not existing_session_deferred:
-            self._set_repair_report(report + "\n\n" + test_report)
-            self.show_detail_error(self.get_text("repair_error"), test_report)
+        if not identity_ok:
+            self.show_detail_error(self.get_text("repair_error"), identity_error)
             return
-        if existing_session_deferred:
-            report += "\n\n" + self.get_text("repair_test_deferred")
+        report += "\n\n" + self.get_text("account_preview").format(username=normalized_username)
+        if password:
+            test_ok, test_report = test_share_credentials(
+                diagnosis.unc_path,
+                normalized_username,
+                password,
+            )
+            existing_session_deferred = (
+                "已有 SMB 会话" in test_report
+                or "existing SMB session" in test_report
+            )
+            if not test_ok and not existing_session_deferred:
+                self._set_repair_report(report + "\n\n" + test_report)
+                self.show_detail_error(self.get_text("repair_error"), test_report)
+                return
+            if existing_session_deferred:
+                report += "\n\n" + self.get_text("repair_test_deferred")
+            else:
+                report += "\n\n" + test_report
         else:
-            report += "\n\n" + test_report
+            report += "\n\n" + self.get_text("repair_reuse_password")
 
         if not messagebox.askyesno(
             self.get_text("repair_confirm_title"),
@@ -1557,6 +1715,8 @@ class DriveNetworkConverter(ctk.CTk):
             username,
             password,
             save_credential=True,
+            account_scope=account_scope,
+            reuse_saved_password=True,
         )
         self.repair_password_entry.delete(0, "end")
         self._set_repair_report(message)

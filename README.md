@@ -17,6 +17,8 @@
 - 新增“重连修复”页，诊断持久映射、凭据目标、SMB 445 和身份冲突，并可确认后重建映射
 - 新增映射可明确选择把账号密码保存到当前用户的 Windows 凭据管理器，解决重启后重复要求密码
 - 新增 SMB 浏览身份排查与用户名/密码测试，可区分密码错误、共享无权限和 Guest 访问
+- 新增账户归属选择；裸用户名默认绑定到目标电脑，避免被 Windows 误记为本机账户
+- “重连修复”可修改现有映射的错误账户前缀，并优先安全复用已保存密码
 - 支持查看、清理可枚举的 SMB 连接，并可按完整 UNC 路径清理隐藏的 1219 冲突连接
 - 添加页面的路径预览支持复制；连续添加共享时保留用户名和密码（关闭软件后失效）
 - 修复网络位置不显示、删除映射后残留红叉驱动器等问题
@@ -86,6 +88,13 @@ python main.py
    - **同时添加两者**
 5. 点击添加并确认。
 
+账户归属：
+
+- **目标电脑本地账户（默认）**：`Administrator` 会解析为 `目标电脑名\Administrator`
+- **AD 域或完整账户**：接受 `DOMAIN\user` 或 `user@domain`，不会改写完整身份
+- **Microsoft 账户**：邮箱会解析为 `MicrosoftAccount\邮箱`
+- 界面会预览实际身份；无法识别目标计算机名时，需手动填写完整身份
+
 说明：
 
 - 账号密码主要用于**映射驱动器**和**浏览共享**
@@ -98,6 +107,8 @@ python main.py
 2. 点击 **诊断**，查看持久映射、精确凭据目标、SMB 445 和当前连接身份。
 3. 输入正确的用户名和密码，点击 **分析后修复**。
 4. 阅读将执行的操作并确认；程序会清理冲突会话、保存精确匹配 UNC 服务器的凭据并重建持久映射。
+
+诊断页还会显示持久映射用户名、目标计算机名和建议用户名。修改错误账户归属时可采用建议值；密码留空会优先复用凭据管理器中已保存的密码，复用失败则恢复原配置并要求输入新密码。
 
 如果诊断显示映射与凭据均正常，但开机后仅短暂出现红叉，通常是网络初始化较慢。程序会给出“计算机启动和登录时始终等待网络”的建议，但不会自动修改组策略。
 
@@ -180,6 +191,8 @@ Useful for managing LAN shares, organizing UNC paths, clearing credentials, and 
 - Added a Reconnect Repair tab that diagnoses persistence, credential targets, SMB 445, and identity conflicts before rebuilding a mapping
 - New mappings can explicitly save credentials in the current user's Windows Credential Manager to prevent password prompts after restart
 - Added SMB browse-identity diagnostics and credential testing to distinguish invalid passwords, share permission failures, and Guest access
+- Added account-scope selection so bare usernames default to the target computer rather than the client computer
+- Reconnect Repair can correct an existing account prefix and safely reuse a saved password first
 - Added a list of clearable SMB connections, plus exact-UNC cleanup for hidden error 1219 conflicts
 - UNC path previews are copyable; username and password remain available for consecutive additions until the app closes
 - Fixed missing Network Locations and stale disconnected drives shown with a red X
@@ -245,6 +258,13 @@ Close open files on the target path before converting. If the drive is busy, you
    - **Both**
 5. Confirm to apply.
 
+Account scope:
+
+- **Target computer local account (default)** resolves `Administrator` to `TARGET-PC\Administrator`
+- **AD domain or full identity** accepts `DOMAIN\user` or `user@domain` unchanged
+- **Microsoft account** resolves an email to `MicrosoftAccount\email`
+- The effective identity is previewed; enter a complete identity if the target name cannot be resolved
+
 Notes:
 
 - Credentials are mainly used for **drive mapping** and **share browsing**
@@ -257,6 +277,8 @@ Notes:
 2. Review persistence, exact credential-target matching, SMB 445, and active identities.
 3. Enter the correct username and password and choose **Review and Repair**.
 4. Confirm the displayed operations. The app clears conflicting sessions, stores a credential matching the UNC server exactly, and rebuilds the persistent mapping.
+
+Diagnosis also shows the persistent mapping username, target computer name, and suggested identity. To correct an account prefix, use the suggestion; leaving the password blank reuses the saved Credential Manager password first and rolls back if it fails.
 
 If the configuration is healthy and the red X is only temporary at sign-in, network initialization may be late. The app recommends the Windows “Always wait for the network” policy but does not change Group Policy automatically.
 

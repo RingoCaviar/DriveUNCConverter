@@ -68,8 +68,12 @@ class DiagnosisTests(unittest.TestCase):
             mock.patch.object(drive_utils, "_tcp_port_open", return_value=port),
             mock.patch.object(drive_utils, "get_mapped_drives",
                               return_value=[("Z:", r"\\192.168.72.253\data")]),
+            mock.patch.object(drive_utils, "_persistent_mapping_username",
+                              return_value=r"NAS\user"),
+            mock.patch.object(drive_utils, "get_remote_computer_name",
+                              return_value=(True, "NAS")),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
             return drive_utils.diagnose_drive_reconnect("Z:")
 
     def test_healthy_mapping(self):
@@ -127,6 +131,42 @@ class AddAndRepairTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("用户名和密码", message)
 
+    def test_add_uses_same_normalized_identity_for_mapping_and_credential(self):
+        with (
+            mock.patch.object(drive_utils, "get_remote_computer_name", return_value=(True, "REMOTE")),
+            mock.patch.object(drive_utils, "_read_windows_credential", return_value=None),
+            mock.patch.object(drive_utils, "add_network_drive", return_value=(True, "mapped")) as mapper,
+            mock.patch.object(drive_utils, "save_windows_credential", return_value=(True, "saved")) as save,
+            mock.patch.object(drive_utils, "_persistent_mapping_username", return_value=r"REMOTE\user"),
+        ):
+            ok, message = drive_utils.add_network_drive_or_location(
+                r"\\192.168.1.10\share", mode="drive", drive_letter="Z:",
+                username="user", password="secret", save_credential=True,
+            )
+        self.assertTrue(ok, message)
+        self.assertEqual(mapper.call_args.kwargs["username"], r"REMOTE\user")
+        save.assert_called_once_with("192.168.1.10", r"REMOTE\user", "secret")
+
+    def test_add_rolls_back_when_windows_records_wrong_identity(self):
+        old = {"TargetName": "server", "Type": 2, "UserName": r"OLD\user"}
+        with (
+            mock.patch.object(drive_utils, "get_remote_computer_name", return_value=(True, "REMOTE")),
+            mock.patch.object(drive_utils, "_read_windows_credential", return_value=old),
+            mock.patch.object(drive_utils, "add_network_drive", return_value=(True, "mapped")),
+            mock.patch.object(drive_utils, "save_windows_credential", return_value=(True, "saved")),
+            mock.patch.object(drive_utils, "_persistent_mapping_username", return_value=r"LOCAL\user"),
+            mock.patch.object(drive_utils, "disconnect_drive", return_value=(True, "removed")) as disconnect,
+            mock.patch.object(drive_utils, "_restore_windows_credential", return_value=True) as restore,
+        ):
+            ok, message = drive_utils.add_network_drive_or_location(
+                r"\\server\share", mode="drive", drive_letter="Z:",
+                username="user", password="secret", save_credential=True,
+            )
+        self.assertFalse(ok)
+        self.assertIn(r"LOCAL\user", message)
+        disconnect.assert_called_once_with("Z:", force=False)
+        restore.assert_called_once_with("server", old)
+
     def test_repair_restores_old_credential_when_mapping_fails(self):
         diagnosis = drive_utils.DriveReconnectDiagnosis(
             drive_letter="Z:",
@@ -155,13 +195,82 @@ class AddAndRepairTests(unittest.TestCase):
                               return_value=True) as restore,
         ):
             ok, message = drive_utils.repair_drive_reconnect(
-                "Z:", "new-user", "new-password"
+                "Z:", r"NAS\new-user", "new-password"
             )
 
         self.assertFalse(ok)
         restore.assert_called_once_with("server", old)
         self.assertIn("old mapping restored", message)
         self.assertNotIn("new-password", message)
+
+
+class AccountIdentityTests(unittest.TestCase):
+    def test_target_bare_username_uses_remote_computer(self):
+        with mock.patch.object(
+            drive_utils, "get_remote_computer_name", return_value=(True, "REMOTE-PC")
+        ):
+            ok, identity, error = drive_utils.normalize_account_identity(
+                "192.168.1.10", "Administrator", drive_utils.ACCOUNT_SCOPE_TARGET
+            )
+        self.assertTrue(ok, error)
+        self.assertEqual(identity, r"REMOTE-PC\Administrator")
+
+    def test_explicit_and_upn_identities_are_not_rewritten(self):
+        for identity in (r"DOMAIN\user", "user@example.com"):
+            ok, actual, error = drive_utils.normalize_account_identity(
+                "server", identity, drive_utils.ACCOUNT_SCOPE_DOMAIN
+            )
+            self.assertTrue(ok, error)
+            self.assertEqual(actual, identity)
+
+    def test_microsoft_email_is_qualified(self):
+        ok, identity, error = drive_utils.normalize_account_identity(
+            "server", "user@example.com", drive_utils.ACCOUNT_SCOPE_MICROSOFT
+        )
+        self.assertTrue(ok, error)
+        self.assertEqual(identity, r"MicrosoftAccount\user@example.com")
+
+    def test_target_resolution_failure_blocks_bare_username(self):
+        with mock.patch.object(
+            drive_utils, "get_remote_computer_name", return_value=(False, "not found")
+        ):
+            ok, identity, error = drive_utils.normalize_account_identity(
+                "server", "user", drive_utils.ACCOUNT_SCOPE_TARGET
+            )
+        self.assertFalse(ok)
+        self.assertEqual(identity, "")
+        self.assertIn("计算机名", error)
+
+    def test_repair_reuses_saved_password_without_exposing_it(self):
+        diagnosis = drive_utils.DriveReconnectDiagnosis(
+            drive_letter="Z:", unc_path=r"\\server\share", server="server",
+            persistent=True, persistent_username=r"OLD\user",
+        )
+        old = {
+            "TargetName": "server", "Type": 2, "UserName": r"OLD\user",
+            "CredentialBlob": "saved-secret",
+        }
+        verified = drive_utils.DriveReconnectDiagnosis(
+            drive_letter="Z:", unc_path=r"\\server\share", server="server",
+            persistent=True, persistent_username=r"NEW\user",
+            credential_target_match=True, saved_credential_users=[r"NEW\user"],
+        )
+        with (
+            mock.patch.object(drive_utils, "diagnose_drive_reconnect",
+                              side_effect=[(True, diagnosis), (True, verified)]),
+            mock.patch.object(drive_utils, "_read_windows_credential", return_value=old),
+            mock.patch.object(drive_utils, "_disconnect_drive_for_repair", return_value=(True, "disconnected")),
+            mock.patch.object(drive_utils, "disconnect_server_sessions", return_value=(True, "cleared", [])),
+            mock.patch.object(drive_utils, "save_windows_credential", return_value=(True, "saved")) as save,
+            mock.patch.object(drive_utils, "map_network_drive_with_credentials", return_value=(True, "mapped")) as mapper,
+        ):
+            ok, message = drive_utils.repair_drive_reconnect(
+                "Z:", r"NEW\user", password=None
+            )
+        self.assertTrue(ok, message)
+        save.assert_called_once_with("server", r"NEW\user", "saved-secret")
+        self.assertEqual(mapper.call_args.kwargs["password"], "saved-secret")
+        self.assertNotIn("saved-secret", message)
 
 
 if __name__ == "__main__":
